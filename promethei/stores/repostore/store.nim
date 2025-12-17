@@ -9,29 +9,27 @@
 
 {.push raises: [].}
 
-import std/sets
-import std/tables
-
 import pkg/chronos
-import pkg/kvstore
+import pkg/chronos/futures
+import pkg/datastore
+import pkg/datastore/typedds
 import pkg/libp2p/[cid, multicodec]
 import pkg/questionable
 import pkg/questionable/results
-import pkg/stew/bitseqs
 
-import ./overlays
+import ./coders
 import ./types
 import ./operations
 import ../blockstore
 import ../keyutils
+import ../queryiterhelper
 import ../../blocktype
+import ../../clock
 import ../../logutils
 import ../../merkletree
 import ../../utils
-import ../../manifest
-import ../../clock
 
-export blocktype, cid, overlays
+export blocktype, cid
 
 logScope:
   topics = "promethei repostore"
@@ -40,348 +38,185 @@ logScope:
 # BlockStore API
 ###########################################################
 
-proc getBlocksBitmap*(
-    self: RepoStore, treeCid: Cid
-): Future[?!BitSeq] {.async: (raises: [CancelledError]).} =
-  ## Get the overlay BitSeq for a given tree CID.
-  ##
-  ## Returns the bitmap of stored block indices. Use for batch
-  ## presence checks (e.g., in fetchBatched) to avoid per-block
-  ## overlay metadata fetches. Returns empty BitSeq if overlay
-  ## doesn't exist.
+method getBlock*(
+    self: RepoStore, cid: Cid
+): Future[?!Block] {.async: (raises: [CancelledError]).} =
+  ## Get a block from the blockstore
   ##
 
-  let key = ?overlayKey(treeCid)
+  logScope:
+    cid = cid
 
-  self.overlayCache.withValue(key, cached):
-    return success(cached[].blocks)
+  if cid.isEmpty:
+    trace "Empty block, ignoring"
+    return cid.emptyBlock
 
-  without overlayMeta =? await self.metaDs.get(key, OverlayMetadata), err:
-    if err of KVStoreKeyNotFound:
-      return success(BitSeq.init(0))
+  without key =? makePrefixKey(self.postFixLen, cid), err:
+    trace "Error getting key from provider", err = err.msg
     return failure(err)
 
-  # Re-check cache: a concurrent write may have populated it while we awaited
-  self.overlayCache.withValue(key, fresher):
-    trace "Overlay cache populated during await, using cached", treeCid
-    return success(fresher[].blocks)
-  self.overlayCache[key] = overlayMeta.val
-  trace "Overlay found", treeCid, bitmapLen = overlayMeta.val.blocks.len
-  success(overlayMeta.val.blocks)
+  without data =? await self.repoDs.get(key), err:
+    if not (err of DatastoreKeyNotFound):
+      trace "Error getting block from datastore", err = err.msg, key
+      return failure(err)
 
-proc checkBitmap*(
+    return failure(newException(BlockNotFoundError, err.msg))
+
+  trace "Got block for cid", cid
+  return Block.new(cid, data, verify = true)
+
+method getBlockAndProof*(
     self: RepoStore, treeCid: Cid, index: Natural
-): Future[?!bool] {.async: (raises: [CancelledError]).} =
-  ## Check if the overlay BitSeq has the bit set for the given index.
-  ##
-  ## Returns true if the bit is set or if the overlay doesn't exist
-  ## (caller should proceed with normal lookup). Returns false if the
-  ## bit is not set (block is definitely absent - caller can fast-reject).
-  ##
-
-  let bits = ?await self.getBlocksBitmap(treeCid)
-  if index >= bits.len or not bits[index]:
-    return success(false)
-
-  success(true)
-
-proc getBlocksAndProofsImpl(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural], withProofs: bool
-): Future[?!seq[(Natural, Block, ?PrometheiProof)]] {.
-    async: (raises: [CancelledError])
-.} =
-  ## Core of getBlocks / getBlocksAndProofs.
-  ##
-  ## Fetches overlay bitmap once, filters indices, then batch-fetches
-  ## leaf metadata and block data in two round-trips total.
-  ## Missing blocks are silently omitted from the result.
-  ## When withProofs is false, stored proofs are returned as-is without
-  ## generating any from flat tree nodes (getBlocks discards them).
-  ##
-
-  if indices.len == 0:
-    return success(newSeq[(Natural, Block, ?PrometheiProof)]())
-
-  logScope:
-    treeCid = treeCid
-    count = indices.len
-
-  trace "Batch getting blocks and proofs"
-
-  # Filter to indices present in bitmap
-  var presentIndices: seq[Natural]
-  for idx in indices:
-    if ?await self.checkBitmap(treeCid, idx.Natural):
-      presentIndices.add(idx)
-
-  if presentIndices.len == 0:
-    return success(newSeq[(Natural, Block, ?PrometheiProof)]())
-
-  # Batch-fetch leaf metadata for all present indices
-  var leafKeys: seq[Key]
-  for idx in presentIndices:
-    leafKeys.add(?blockLeafKey(treeCid, idx))
-
-  let leafRecords = ?await self.metaDs.get(leafKeys, LeafMetadata)
-
-  trace "Leaf metadata fetched",
-    treeCid, leafKeysLen = leafKeys.len, leafRecordsLen = leafRecords.len
-
-  # Generate proofs from flat tree nodes for dataset trees with a manifest.
-  # Empty-CID leaves (erasure padding) and trees without a resolvable shape
-  # (no manifest, slot roots) keep their stored proofs.
-  var
-    generatedProofs: Table[Natural, PrometheiProof]
-    shapeResolved = false
-  if withProofs:
-    let shape = ?await self.resolveTreeShape(treeCid)
-    if shapeVal =? shape:
-      shapeResolved = true
-      let (nleaves, mcodec) = shapeVal
-
-      var nonEmptyIndices: seq[Natural]
-      for record in leafRecords:
-        if not record.val.blkCid.isEmpty and not record.val.deleted:
-          nonEmptyIndices.add((?catch(parseInt(record.key.value))).Natural)
-
-      if nonEmptyIndices.len > 0:
-        let proofs =
-          ?await self.getTreeProofs(treeCid, nonEmptyIndices, nleaves, mcodec)
-        for (index, proof) in proofs:
-          generatedProofs[index] = proof
-
-  # Collect block data keys from leaf records.
-  # leafRecords may be a subset of leafKeys (missing silently skipped).
-  # Empty-CID leaves (erasure padding) are synthesized directly without
-  # repoDs lookup - they are never stored but callers expect them back.
-  var
-    keyToCidProof: Table[Key, (Natural, Cid, ?PrometheiProof)]
-    results: seq[(Natural, Block, ?PrometheiProof)]
-  for record in leafRecords:
-    let blkCid = record.val.blkCid
-
-    if blkCid.isEmpty:
-      let index = ?catch(parseInt(record.key.value))
-      results.add((index.Natural, ?blkCid.emptyBlock, record.val.proof))
-      continue
-
-    let
-      index = ?catch(parseInt(record.key.value))
-      proof =
-        if shapeResolved and not record.val.blkCid.isEmpty and not record.val.deleted and
-            generatedProofs.hasKey(index):
-          (?catch(generatedProofs[index])).some
-        else:
-          record.val.proof
-      key = ?makePrefixKey(self.postFixLen, blkCid)
-    keyToCidProof[key] = (index.Natural, blkCid, proof)
-
-  if keyToCidProof.len > 0:
-    # Batch-fetch block data from FS.
-    var blkRecords = ?await self.repoDs.get(toSeq(keyToCidProof.keys))
-
-    for record in blkRecords.mitems:
-      let (idx, cid, proof) = ?catch(keyToCidProof[record.key])
-      results.add((idx, ?Block.new(cid, move record.val, verify = false), proof))
-
-  trace "Batch got blocks and proofs", found = results.len
-  success(results)
-
-method getBlocks*(
-    self: RepoStore, cids: seq[Cid]
-): Future[?!seq[Block]] {.async: (raises: [CancelledError]).} =
-  ## Get multiple blocks by CID from the blockstore (no tree context).
-  ## Empty CIDs are synthesized directly. Missing blocks are silently omitted.
-  ##
-
-  if cids.len == 0:
-    return success(newSeq[Block]())
-
-  var
-    keyToCid: Table[Key, Cid]
-    blocks: seq[Block]
-
-  for cid in cids:
-    if cid.isEmpty:
-      blocks.add(?cid.emptyBlock)
-      continue
-
-    let key = ?makePrefixKey(self.postFixLen, cid)
-    keyToCid[key] = cid
-
-  if keyToCid.len > 0:
-    var records = ?await self.repoDs.get(toSeq(keyToCid.keys))
-    for record in records.mitems:
-      let cid = ?catch(keyToCid[record.key])
-      blocks.add(?Block.new(cid, move record.val, verify = true))
-
-  success(blocks)
-
-method getBlocks*(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Natural, Block)]] {.async: (raises: [CancelledError]).} =
-  ## Get multiple blocks by tree CID and indices as a batch.
-  ## Delegates to the core fetch without proof generation (proofs are
-  ## discarded here, so generating them would be wasted work).
-  ##
-
-  success(
-    (?await self.getBlocksAndProofsImpl(treeCid, indices, withProofs = false)).mapIt(
-      (it[0], it[1])
-    )
-  )
-
-method putCidsAndProofs*(
-    self: RepoStore, treeCid: Cid, items: seq[(Natural, Cid, PrometheiProof)]
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Put multiple CIDs and proofs as a batch
-  ##
-
-  logScope:
-    treeCid = treeCid
-    totalItems = items.len
-
-  trace "Storing batch Leaf and Block Metadata"
-
-  if items.len == 0:
-    return success()
-
-  if err =? (await self.putLeafBlockMeta(treeCid, items)).errorOption:
-    trace "Unable to store batch Leaf and Block Metadata", err = err.msg
+): Future[?!(Block, PrometheiProof)] {.async: (raises: [CancelledError]).} =
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
     return failure(err)
 
-  return success()
-
-method putCellCidsAndProofs*(
-    self: RepoStore, treeCid: Cid, items: seq[(Natural, Cid, Cid, PrometheiProof)]
-): Future[?!void] {.async: (raises: [CancelledError]), gcsafe.} =
-  ## Put multiple cell CIDs and proofs as a batch for slot proof trees.
-  ## Each item is (index, cellCid, blkCid, proof).
-  ##
-
-  logScope:
-    treeCid = treeCid
-    totalItems = items.len
-
-  trace "Storing batch Leaf and Block Metadata"
-
-  if items.len == 0:
-    return success()
-
-  if err =? (await self.putCellLeafBlockMeta(treeCid, items)).errorOption:
-    trace "Unable to store batch Leaf and Block Metadata", err = err.msg
+  without blk =? await self.getBlock(leafMd.blkCid), err:
     return failure(err)
 
-  return success()
+  success((blk, leafMd.proof))
 
-method putBlocks*(
-    self: RepoStore, treeCid: Cid, items: seq[(Block, Natural, ?PrometheiProof)]
+method getBlock*(
+    self: RepoStore, treeCid: Cid, index: Natural
+): Future[?!Block] {.async: (raises: [CancelledError]).} =
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    return failure(err)
+
+  await self.getBlock(leafMd.blkCid)
+
+method getBlock*(
+    self: RepoStore, address: BlockAddress
+): Future[?!Block] {.async: (raw: true, raises: [CancelledError]).} =
+  ## Get a block from the blockstore
+  ##
+
+  if address.leaf:
+    self.getBlock(address.treeCid, address.index)
+  else:
+    self.getBlock(address.cid)
+
+method ensureExpiry*(
+    self: RepoStore, cid: Cid, expiry: SecondsSince1970
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Put multiple leafs and blocks as a batch (primary method)
+  ## Ensure that block's associated expiry is at least given timestamp
+  ## If the current expiry is lower then it is updated to the given one, otherwise it is left intact
+  ##
+
+  if expiry <= 0:
+    return
+      failure(newException(ValueError, "Expiry timestamp must be larger then zero"))
+
+  await self.updateBlockMetadata(cid, minExpiry = expiry)
+
+method ensureExpiry*(
+    self: RepoStore, treeCid: Cid, index: Natural, expiry: SecondsSince1970
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  ## Ensure that block's associated expiry is at least given timestamp
+  ## If the current expiry is lower then it is updated to the given one, otherwise it is left intact
+  ##
+
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    return failure(err)
+
+  await self.ensureExpiry(leafMd.blkCid, expiry)
+
+method putCidAndProof*(
+    self: RepoStore, treeCid: Cid, index: Natural, blkCid: Cid, proof: PrometheiProof
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  ## Put a block to the blockstore
   ##
 
   logScope:
     treeCid = treeCid
-    totalItems = items.len
+    index = index
+    blkCid = blkCid
 
-  trace "Storing Leafs and Blocks"
+  trace "Storing LeafMetadata"
 
-  if items.len == 0:
-    return success()
+  without res =? await self.putLeafMetadata(treeCid, index, blkCid, proof), err:
+    return failure(err)
 
-  var
-    totalSize = 0
-    uniqueBlks: HashSet[Cid]
-
-  let blocks = collect(newSeq):
-    for (blk, idx, proof) in items.deduplicate():
-      if not blk.cid.isEmpty:
-        totalSize += blk.data.len
-        uniqueBlks.incl(blk.cid)
-      (idx, blk.cid, proof, blk.data)
-
-  trace "Putting blocks", actualBlocks = blocks.len, totalSize
-
-  if not self.available(totalSize.NBytes):
-    return failure(newException(QuotaNotEnoughError, "Blocks would exceed quota!"))
-
-  # Atomic metadata update
-  ?await self.putLeafBlockMeta(treeCid, blocks)
-
-  if onBlock =? self.onBlockStored:
-    for cid in uniqueBlks:
-      await onBlock(cid)
+  if blkCid.mcodec == BlockCodec:
+    if res == Stored:
+      if err =? (await self.updateBlockMetadata(blkCid, plusRefCount = 1)).errorOption:
+        return failure(err)
+      trace "Leaf metadata stored, block refCount incremented"
+    else:
+      trace "Leaf metadata already exists"
 
   return success()
+
+method getCidAndProof*(
+    self: RepoStore, treeCid: Cid, index: Natural
+): Future[?!(Cid, PrometheiProof)] {.async: (raises: [CancelledError]).} =
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    return failure(err)
+
+  success((leafMd.blkCid, leafMd.proof))
 
 method getCid*(
     self: RepoStore, treeCid: Cid, index: Natural
 ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
-  success (?await self.getLeafMetadata(treeCid, index)).blkCid
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    return failure(err)
 
-proc putBlockInternal(
-    self: RepoStore, blk: Block
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  logScope:
-    cid = blk.cid
-
-  if blk.cid.isEmpty:
-    trace "Skipping empty block"
-    return success()
-
-  if not self.available(blk.data.len.NBytes):
-    return failure(newException(QuotaNotEnoughError, "Block would exceed quota!"))
-
-  if err =? (
-    await self.metaDs.put(
-      ?blockMetaKey(blk.cid), BlockMetadata(refCount: 0, cid: blk.cid)
-    )
-  ).errorOption:
-    if err of KVConflictError:
-      trace "Block metadata already exists", err = err.msg
-      # don't return here, allow writing the block on disk
-    else:
-      trace "Error writing block metadata", err = err.msg
-      return failure(err)
-
-  let blkKey = ?makePrefixKey(self.postFixLen, blk.cid)
-
-  # we never update blocks on fs, we only insert
-  if err =? (await self.repoDs.put(RawKVRecord.init(blkKey, blk.data))).errorOption:
-    if err of KVConflictError:
-      trace "Block already in store", err = err.msg
-      return success()
-    else:
-      trace "Error writing block on disk", err = err.msg
-      return failure(err)
-
-  ?await self.updateCounters(quotaDelta = blk.data.len, blocksDelta = 1)
-  if onBlock =? self.onBlockStored:
-    await onBlock(blk.cid)
-
-  return success()
+  success(leafMd.blkCid)
 
 method putBlock*(
     self: RepoStore, blk: Block, ttl = Duration.none
-): Future[?!void] {.
-    async: (raises: [CancelledError], raw: true),
-    deprecated:
-      "Use putBlock(treeCid: Cid, items: seq[(Block, Natural, PrometheiProof)])"
-.} =
-  putBlockInternal(self, blk)
-
-proc blockRefCount*(
-    self: RepoStore, cid: Cid
-): Future[?!Natural] {.async: (raises: [CancelledError]).} =
-  ## Returns the reference count for a block. If the count is zero;
-  ## this means the block is eligible for garbage collection.
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  ## Put a block to the blockstore
   ##
 
-  without blockMeta =? (await self.metaDs.get(?blockMetaKey(cid), BlockMetadata)), err:
-    trace "Unable to retrieve block metadata", err = err.msg
+  logScope:
+    cid = blk.cid
+
+  let expiry = self.clock.now() + (ttl |? self.blockTtl).seconds
+
+  without res =? await self.storeBlock(blk, expiry), err:
     return failure(err)
 
-  success blockMeta.val.refCount
+  if res.kind == Stored:
+    trace "Block Stored"
+    if err =? (await self.updateQuotaUsage(plusUsed = res.used)).errorOption:
+      # rollback changes
+      without delRes =? await self.tryDeleteBlock(blk.cid), err:
+        return failure(err)
+      return failure(err)
+
+    if err =? (await self.updateTotalBlocksCount(plusCount = 1)).errorOption:
+      return failure(err)
+
+    if onBlock =? self.onBlockStored:
+      await onBlock(blk.cid)
+  else:
+    trace "Block already exists"
+
+  return success()
+
+proc delBlockInternal(
+    self: RepoStore, cid: Cid
+): Future[?!DeleteResultKind] {.async: (raises: [CancelledError]).} =
+  logScope:
+    cid = cid
+
+  if cid.isEmpty:
+    return success(Deleted)
+
+  trace "Attempting to delete a block"
+
+  without res =? await self.tryDeleteBlock(cid, self.clock.now()), err:
+    return failure(err)
+
+  if res.kind == Deleted:
+    trace "Block deleted"
+    if err =? (await self.updateTotalBlocksCount(minusCount = 1)).errorOption:
+      return failure(err)
+
+    if err =? (await self.updateQuotaUsage(minusUsed = res.released)).errorOption:
+      return failure(err)
+
+  success(res.kind)
 
 method delBlock*(
     self: RepoStore, cid: Cid
@@ -392,25 +227,41 @@ method delBlock*(
   logScope:
     cid = cid
 
-  if cid.isEmpty:
-    trace "Skipping empty Cid"
-    return success()
-
-  without refCount =? (await self.blockRefCount(cid)), err:
-    if err of KVStoreKeyNotFound:
-      return failure(newException(BlockNotFoundError, err.msg))
+  without outcome =? await self.delBlockInternal(cid), err:
     return failure(err)
 
-  if refCount > 0.Natural:
-    return
-      failure("Directly deleting a block that is part of a dataset is not allowed.")
+  case outcome
+  of InUse:
+    failure("Directly deleting a block that is part of a dataset is not allowed.")
+  of NotFound:
+    trace "Block not found, ignoring"
+    success()
+  of Deleted:
+    trace "Block already deleted"
+    success()
 
-  let skipped = ?await self.tryDeleteBlocks(cid)
-  if skipped.len > 0:
-    trace "Some blocks were not deleted, likely due to refCount > 0",
-      skipped = skipped.len
+method delBlock*(
+    self: RepoStore, treeCid: Cid, index: Natural
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    if err of BlockNotFoundError:
+      return success()
+    else:
+      return failure(err)
 
-  return success()
+  if err =? (await self.delLeafMetadata(treeCid, index)).errorOption:
+    error "Failed to delete leaf metadata, block will remain on disk.", err = err.msg
+    return failure(err)
+
+  if err =?
+      (await self.updateBlockMetadata(leafMd.blkCid, minusRefCount = 1)).errorOption:
+    if not (err of BlockNotFoundError):
+      return failure(err)
+
+  without _ =? await self.delBlockInternal(leafMd.blkCid), err:
+    return failure(err)
+
+  success()
 
 method hasBlock*(
     self: RepoStore, cid: Cid
@@ -422,7 +273,7 @@ method hasBlock*(
     cid = cid
 
   if cid.isEmpty:
-    trace "Skipping empty block"
+    trace "Empty block, ignoring"
     return success true
 
   without key =? makePrefixKey(self.postFixLen, cid), err:
@@ -431,35 +282,20 @@ method hasBlock*(
 
   return await self.repoDs.has(key)
 
-method hasBlocks*(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Natural, bool)]] {.async: (raises: [CancelledError]).} =
-  ## Check if multiple blocks exist in the overlay bitmap.
-  ##
-  ## We use the bitmap exclusively for fast checks. By
-  ## definition there is no guarantee that a block we
-  ## deemed as present may have been deleted between operations.
-  ## The ultimate source of truth is the blocks store itself -
-  ## either the block is on disk and it will be returned with
-  ## a getBlock* variant, or it isn't and it needs to be recovered
-  ## or downloaded. Results include the index for caller matching;
-  ## ordering is not guaranteed.
-  ##
+method hasBlock*(
+    self: RepoStore, treeCid: Cid, index: Natural
+): Future[?!bool] {.async: (raises: [CancelledError]).} =
+  without leafMd =? await self.getLeafMetadata(treeCid, index), err:
+    if err of BlockNotFoundError:
+      return success(false)
+    else:
+      return failure(err)
 
-  if indices.len == 0:
-    return success(newSeq[(Natural, bool)]())
-
-  let indices = indices.deduplicate()
-
-  var results: seq[(Natural, bool)]
-  for idx in indices:
-    results.add((idx, ?await self.checkBitmap(treeCid, idx.Natural)))
-
-  success(results)
+  await self.hasBlock(leafMd.blkCid)
 
 method listBlocks*(
     self: RepoStore, blockType = BlockType.Manifest
-): Future[?!AsyncIter[Cid]] {.async: (raises: [CancelledError]).} =
+): Future[?!SafeAsyncIter[Cid]] {.async: (raises: [CancelledError]).} =
   ## Get the list of blocks in the RepoStore.
   ## This is an intensive operation
   ##
@@ -475,143 +311,70 @@ method listBlocks*(
     trace "Error querying cids in repo", blockType, err = err.msg
     return failure(err)
 
-  return success AsyncIter[Cid].new(
-    proc(): Future[Cid] {.async.} =
-      await idleAsync()
-      if maybeRecord =? (await queryIter.next()):
-        if record =? maybeRecord:
-          trace "Retrieved record from repo", key = record.key
-          without cid =? Cid.init(record.key.value).mapFailure, err:
-            raise err
-          return cid
-      raise newException(CatchableError, "No or invalid Cid"),
-    proc(): bool =
-      queryIter.finished,
-    proc(): Future[void] {.async.} =
-      if err =? (await dispose(queryIter)).errorOption:
-        raise err
-    ,
-    proc(): bool =
-      queryIter.disposed,
-  )
+  proc next(): Future[?!Cid] {.async: (raises: [CancelledError]).} =
+    await idleAsync()
+    if pair =? (await queryIter.next()):
+      if cid =? pair.key:
+        doAssert pair.data.len == 0
+        trace "Retrieved record from repo", cid
+        return Cid.init(cid.value).mapFailure
+    return Cid.failure("No or invalid Cid")
 
-method delBlocks*(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Delete multiple blocks by tree CID and indices as a batch.
+  proc isFinished(): bool =
+    queryIter.finished
+
+  return success SafeAsyncIter[Cid].new(next, isFinished)
+
+proc createBlockExpirationQuery(maxNumber: int, offset: int): ?!Query =
+  let queryKey = ?createBlockExpirationMetadataQueryKey()
+  success Query.init(queryKey, offset = offset, limit = maxNumber)
+
+proc blockRefCount*(self: RepoStore, cid: Cid): Future[?!Natural] {.async.} =
+  ## Returns the reference count for a block. If the count is zero;
+  ## this means the block is eligible for garbage collection.
   ##
-  ## Uses delLeafBlockMetadata which performs atomic delete of leaf
-  ## metadata and block refcount updates.
-  ##
+  without key =? createBlockExpirationMetadataKey(cid), err:
+    return failure(err)
 
-  if indices.len == 0:
-    return success()
+  without md =? await get[BlockMetadata](self.metaDs, key), err:
+    return failure(err)
 
-  logScope:
-    treeCid = treeCid
-    count = indices.len
+  return success(md.refCount)
 
-  trace "Batch deleting blocks"
-
-  ?await self.delLeafBlockMetadata(treeCid, indices)
-  success()
-
-method getBlocksAndProofs*(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Natural, Block, ?PrometheiProof)]] {.
-    async: (raises: [CancelledError])
+method getBlockExpirations*(
+    self: RepoStore, maxNumber: int, offset: int
+): Future[?!SafeAsyncIter[BlockExpiration]] {.
+    async: (raises: [CancelledError]), base, gcsafe
 .} =
-  ## Get multiple blocks and proofs as a batch.
-  ##
-  ## For dataset trees with an attached manifest, proofs are generated from
-  ## the persisted flat tree nodes; otherwise stored proofs are returned.
+  ## Get iterator with block expirations
   ##
 
-  success(?await self.getBlocksAndProofsImpl(treeCid, indices, withProofs = true))
+  without beQuery =? createBlockExpirationQuery(maxNumber, offset), err:
+    error "Unable to format block expirations query", err = err.msg
+    return failure(err)
 
-method getCidsAndProofs*(
-    self: RepoStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Cid, ?PrometheiProof)]] {.async: (raises: [CancelledError]).} =
-  ## Get multiple CIDs and proofs as a batch.
-  ##
-  ## Fetches overlay bitmap once, filters indices, then batch-fetches
-  ## leaf metadata. No block data fetch needed - only metadata.
-  ## Missing entries are silently omitted from the result.
-  ##
+  without queryIter =? await query[BlockMetadata](self.metaDs, beQuery), err:
+    error "Unable to execute block expirations query", err = err.msg
+    return failure(err)
 
-  if indices.len == 0:
-    return success(newSeq[(Cid, ?PrometheiProof)]())
+  let filteredIter: SafeAsyncIter[KeyVal[BlockMetadata]] =
+    await queryIter.toSafeAsyncIter().filterSuccess()
 
-  logScope:
-    treeCid = treeCid
-    count = indices.len
+  proc mapping(
+      kvRes: ?!KeyVal[BlockMetadata]
+  ): Future[Option[?!BlockExpiration]] {.async: (raises: [CancelledError]).} =
+    without kv =? kvRes, err:
+      error "Error occurred when getting KeyVal", err = err.msg
+      return Result[BlockExpiration, ref CatchableError].none
+    without cid =? Cid.init(kv.key.value).mapFailure, err:
+      error "Failed decoding cid", err = err.msg
+      return Result[BlockExpiration, ref CatchableError].none
 
-  trace "Batch getting CIDs and proofs"
+    some(success(BlockExpiration(cid: cid, expiry: kv.value.expiry)))
 
-  # Filter to indices present in bitmap
-  var presentIndices: seq[Natural]
-  for idx in indices:
-    if ?await self.checkBitmap(treeCid, idx.Natural):
-      presentIndices.add(idx)
-
-  if presentIndices.len == 0:
-    return success(newSeq[(Cid, ?PrometheiProof)]())
-
-  # Batch-fetch leaf metadata for all present indices
-  var leafKeys: seq[Key]
-  for idx in presentIndices:
-    leafKeys.add(?blockLeafKey(treeCid, idx))
-
-  let leafRecords = ?await self.metaDs.get(leafKeys, LeafMetadata)
-
-  trace "Leaf metadata fetched",
-    treeCid, leafKeysLen = leafKeys.len, leafRecordsLen = leafRecords.len
-
-  # Generate proofs from flat tree nodes for dataset trees with a manifest.
-  # Empty-CID leaves (erasure padding) and trees without a resolvable shape
-  # (no manifest, slot roots) keep their stored proofs.
-  var
-    generatedProofs: Table[Natural, PrometheiProof]
-    shapeResolved = false
-  let shape = ?await self.resolveTreeShape(treeCid)
-  if shapeVal =? shape:
-    shapeResolved = true
-    let (nleaves, mcodec) = shapeVal
-
-    var nonEmptyIndices: seq[Natural]
-    for record in leafRecords:
-      if not record.val.blkCid.isEmpty and not record.val.deleted:
-        nonEmptyIndices.add((?catch(parseInt(record.key.value))).Natural)
-
-    if nonEmptyIndices.len > 0:
-      let proofs = ?await self.getTreeProofs(treeCid, nonEmptyIndices, nleaves, mcodec)
-      for (index, proof) in proofs:
-        generatedProofs[index] = proof
-
-  # Extract CID and proof from each leaf record
-  var results: seq[(Cid, ?PrometheiProof)]
-  for record in leafRecords:
-    let
-      index = (?catch(parseInt(record.key.value))).Natural
-      proof =
-        if shapeResolved and not record.val.blkCid.isEmpty and not record.val.deleted and
-            generatedProofs.hasKey(index):
-          (?catch(generatedProofs[index])).some
-        else:
-          record.val.proof
-    results.add((record.val.blkCid, proof))
-
-  trace "Batch got CIDs and proofs", found = results.len
-  success(results)
-
-method putBlocks*(
-    self: RepoStore, treeCid: Cid, blocks: seq[(Natural, Block)]
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Put multiple blocks without proofs (for non-leaf blocks)
-  ##
-  for (index, blk) in blocks:
-    ?await self.putBlock(treeCid, blk, index, PrometheiProof.none)
-  success()
+  let blockExpIter =
+    await mapFilter[KeyVal[BlockMetadata], BlockExpiration](filteredIter, mapping)
+  success(blockExpIter)
 
 method close*(self: RepoStore): Future[void] {.async: (raises: []).} =
   ## Close the blockstore, cleaning up resources managed by it.
@@ -621,12 +384,13 @@ method close*(self: RepoStore): Future[void] {.async: (raises: []).} =
   trace "Closing repostore"
 
   if not self.metaDs.isNil:
-    if err =? (await noCancel self.metaDs.close()).errorOption:
-      error "Failed to close metadata store!", err = err.msg
+    try:
+      (await noCancel self.metaDs.close()).expect("Should meta datastore")
+    except CatchableError as err:
+      error "Failed to close meta datastore", err = err.msg
 
   if not self.repoDs.isNil:
-    if err =? (await noCancel self.repoDs.close()).errorOption:
-      error "Failed to close repods store!", err = err.msg
+    (await noCancel self.repoDs.close()).expect("Should repo datastore")
 
 ###########################################################
 # RepoStore procs
@@ -640,10 +404,7 @@ proc reserve*(
 
   trace "Reserving bytes", bytes
 
-  if not self.available(bytes):
-    return failure(newException(QuotaNotEnoughError, "Not enough bytes to reserve!"))
-
-  await self.updateCounters(reservedDelta = bytes.int)
+  await self.updateQuotaUsage(plusReserved = bytes)
 
 proc release*(
     self: RepoStore, bytes: NBytes
@@ -652,53 +413,8 @@ proc release*(
   ##
 
   trace "Releasing bytes", bytes
-  if bytes > self.quotaReservedBytes:
-    return failure(newException(QuotaNotEnoughError, "Not enough bytes to release!"))
 
-  await self.updateCounters(reservedDelta = -(bytes.int))
-
-method storeManifest*(
-    self: RepoStore, manifest: Manifest
-): Future[?!Block] {.async: (raises: [CancelledError]), gcsafe.} =
-  ## Store a manifest block with an overlay for the manifest's treeCid.
-  ##
-
-  await self.storeManifestBlock(@[manifest.treeCid], manifest)
-
-proc storeVerifiableManifest*(
-    self: RepoStore, manifest: Manifest, slotIdx = Natural.none, expiry = ZeroSeconds
-): Future[?!Block] {.async: (raises: [CancelledError]), gcsafe.} =
-  ## Store a verifiable manifest with overlays for slot roots.
-  ## If slotIdx is provided, only that slot's overlay is created.
-  ## Otherwise, overlays for all slot roots are created.
-  ##
-
-  if not manifest.verifiable:
-    return failure(
-      newException(
-        PrometheiError, "storeVerifiableManifest requires a verifiable manifest"
-      )
-    )
-
-  let rootCids =
-    if idx =? slotIdx:
-      @[manifest.slotRoots[idx]]
-    else:
-      manifest.slotRoots
-
-  await self.storeManifestBlock(rootCids, manifest, expiry)
-
-method fetchManifest*(
-    self: RepoStore, cid: Cid
-): Future[?!Manifest] {.async: (raises: [CancelledError]), gcsafe.} =
-  ## Fetch and decode a manifest from the blockstore.
-  ## Retrieves the block by CID and decodes it as a Manifest.
-  ##
-
-  without blk =? await self.getBlock(cid), err:
-    return failure(err)
-
-  Manifest.decode(blk.data)
+  await self.updateQuotaUsage(minusReserved = bytes)
 
 proc start*(
     self: RepoStore
@@ -710,14 +426,12 @@ proc start*(
     trace "Repo already started"
     return
 
-  trace "Starting repo"
+  trace "Starting rep"
+  if err =? (await self.updateTotalBlocksCount()).errorOption:
+    raise newException(PrometheiError, err.msg)
 
-  if error =? (await self.initializeCounters()).errorOption:
-    trace "Initializing counters failed", error = error.msg
-    let message = "unable to start repo store: " & error.msg
-    raise newException(PrometheiError, message)
-  trace "Counters initialized",
-    quotaUsage = self.quotaUsage, totalBlocks = self.totalBlocks
+  if err =? (await self.updateQuotaUsage()).errorOption:
+    raise newException(PrometheiError, err.msg)
 
   self.started = true
 
