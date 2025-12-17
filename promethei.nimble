@@ -2,29 +2,48 @@ version = "0.1.0"
 author = "Promethei Team"
 description = "data durability engine"
 license = "MIT"
-bin = @["promethei", "tools/cirdl/cirdl", "tools/setup/setup"]
+bin = @["promethei", "tools/cirdl/cirdl"]
 binDir = "build"
 
+requires "https://github.com/promethei-project/nim-libp2p#multihash-poseidon2"
+requires "https://github.com/promethei-project/nim-promethei-dht >= 0.7.1"
+requires "https://github.com/promethei-project/nim-ethers >= 3.1.0"
+requires "https://github.com/status-im/nim-toml-serialization >= 0.2.14"
+requires "https://github.com/status-im/lrucache.nim >= 1.2.2"
+requires "https://github.com/promethei-project/nim-nitro >= 0.7.2"
+requires "https://github.com/promethei-project/nim-datastore >= 0.4.0"
+requires "https://github.com/status-im/nim-presto >= 0.1.0"
+requires "https://github.com/promethei-project/nim-circom-compat >= 0.1.3"
+requires "https://github.com/promethei-project/nim-serde >= 2.1.0"
+requires "https://github.com/promethei-project/nim-leopard >= 0.2.2"
+requires "https://github.com/guzba/zippy >= 0.10.16"
+requires "https://github.com/promethei-project/nim-chronicles#version-0-12-3-pre" # TODO: update to version 0.12.3 once it is released
+requires "https://github.com/promethei-project/nim-groth16 >= 0.1.1"
+requires "https://github.com/promethei-project/circom-witnessgen >= 0.1.3"
+
 import std/os
-import "./vendor/nimble/deps.nims"
 
 task test, "Run node tests":
-  exec "nim -d:release c -r tests" / "testNode"
+  exec "nimble c tests" / "testNode"
+  exec "tests" / "testNode".toExe
 
 task testContracts, "Run contract tests":
-  exec "nim c -r tests" / "testContracts"
+  exec "nimble c tests" / "testContracts"
+  exec "tests" / "testContracts".toExe
 
 task testIntegration, "Run integration tests":
-  exec "nim c" &
+  exec "nimble c" &
     " --define:release" &
     " --define:promethei_system_testing_options" &
     " --out:build" / "integration-test" / "promethei-for-testing".toExe &
     " promethei"
-  exec "nim c -r tests" / "testIntegration"
+  exec "nimble c tests" / "testIntegration"
+  exec "tests" / "testIntegration".toExe
 
 task testTools, "Run circuit downloader tests":
   exec "nimble build"
-  exec "nim c -r tests" / "testTools"
+  exec "nimble c tests" / "testTools"
+  exec "tests" / "testTools".toExe
 
 task testAll, "Run all tests":
   testTask()
@@ -38,19 +57,3 @@ task format, "Format code using NPH":
   exec findExe("nph") & " promethei/"
   exec findExe("nph") & " tests/"
   exec findExe("nph") & " tools/"
-
-task syncModules, "Sync submodules to pinned commits (safe)":
-  exec "git submodule sync --recursive"
-  exec "git submodule update --init --recursive"
-
-task syncUnsafe, "Reset and clean submodules to pinned commits (destructive)":
-  exec "git submodule sync --recursive"
-  exec "git submodule foreach --recursive 'git reset --hard'"
-  exec "git submodule foreach --recursive 'git clean -fdx'"
-  exec "git submodule update --init --recursive --force"
-
-task addDep, "Add vendored Nim dependency (git submodule)":
-  addDepTask(thisDir())
-
-task removeDep, "Remove vendored Nim dependency (git submodule)":
-  removeDepTask(thisDir())
