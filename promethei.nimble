@@ -19,7 +19,7 @@ requires "https://github.com/promethei-project/nim-leopard >= 0.2.2"
 requires "https://github.com/guzba/zippy >= 0.10.16"
 requires "https://github.com/promethei-project/nim-chronicles#version-0-12-3-pre" # TODO: update to version 0.12.3 once it is released
 requires "https://github.com/promethei-project/nim-groth16 >= 0.1.1"
-requires "https://github.com/promethei-project/circom-witnessgen >= 0.1.3"
+requires "https://github.com/promethei-project/circom-witnessgen >= 0.1.4"
 
 import std/os
 
