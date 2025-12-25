@@ -11,12 +11,11 @@
 
 import std/options
 import std/sequtils
+import std/strformat
 import std/sugar
 import times
 
-import pkg/iter
 import pkg/taskpools
-import pkg/stew/bitseqs
 import pkg/questionable
 import pkg/questionable/results
 import pkg/chronos
@@ -31,24 +30,26 @@ import pkg/libp2p/stream/bufferstream
 import pkg/libp2p/routing_record
 import pkg/libp2p/signed_envelope
 
-import ./metrics
 import ./chunker
 import ./slots
 import ./clock
 import ./blocktype as bt
 import ./manifest
 import ./merkletree
-import ./merkletree/promethei/asynctree
 import ./stores
 import ./blockexchange
 import ./streams
 import ./erasure
 import ./discovery
 import ./marketplace
+import ./contracts
+import ./sales
+import ./marketplace/abstractmarketplace
 import ./indexingstrategy
 import ./utils
 import ./errors
 import ./logutils
+import ./utils/asynciter
 import ./utils/trackedfutures
 import ./utils/poseidon2digest
 
@@ -57,25 +58,25 @@ export logutils
 logScope:
   topics = "promethei node"
 
-const
-  DefaultFetchBatch = 128
-  DefaultStoreBatch* = 1024 ## Number of blocks to batch when storing data
-  MaxInFlightBatches = 4 ## Maximum concurrent batch flushes for bounded parallelism
+declareGauge(promethei_proofs_per_period, "promethei proofs per period")
+
+const DefaultFetchBatch = 10
 
 type
   PrometheiNode* = object
     switch: Switch
     networkId: PeerId
     networkStore: NetworkStore
-    repoStore: RepoStore
     engine: BlockExcEngine
     prover: ?Prover
     discovery: Discovery
     marketplace: ?MarketplaceNode
+    clock*: Clock
     taskpool: Taskpool
     trackedFutures: TrackedFutures
     # proofs/period metric:
     numProofs: int64
+    currentPeriod: Period
 
   PrometheiNodeRef* = ref PrometheiNode
 
@@ -88,6 +89,9 @@ func switch*(self: PrometheiNodeRef): Switch =
   return self.switch
 
 func blockStore*(self: PrometheiNodeRef): BlockStore =
+  return self.networkStore
+
+func networkStore*(self: PrometheiNodeRef): NetworkStore =
   return self.networkStore
 
 func engine*(self: PrometheiNodeRef): BlockExcEngine =
@@ -106,6 +110,23 @@ func `marketplace=`*(self: PrometheiNodeRef, marketplace: MarketplaceNode) =
   doAssert self.marketplace.isNone
   self.marketplace = some marketplace
 
+proc storeManifest*(
+    self: PrometheiNodeRef, manifest: Manifest
+): Future[?!bt.Block] {.async: (raises: [CancelledError]).} =
+  without encodedVerifiable =? manifest.encode(), err:
+    trace "Unable to encode manifest"
+    return failure(err)
+
+  without blk =? bt.Block.new(data = encodedVerifiable, codec = ManifestCodec), error:
+    trace "Unable to create block from manifest"
+    return failure(error)
+
+  if err =? (await self.networkStore.putBlock(blk)).errorOption:
+    trace "Unable to store manifest block", cid = blk.cid, err = err.msg
+    return failure(err)
+
+  success blk
+
 proc fetchManifest*(
     self: PrometheiNodeRef, cid: Cid
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
@@ -117,7 +138,7 @@ proc fetchManifest*(
 
   trace "Retrieving manifest for cid", cid
 
-  without blk =? await self.networkStore.getBlock(cid), err:
+  without blk =? await self.networkStore.getBlock(BlockAddress.init(cid)), err:
     trace "Error retrieve manifest block", cid, err = err.msg
     return failure err
 
@@ -131,6 +152,19 @@ proc fetchManifest*(
 
   return manifest.success
 
+proc fetchManifest*(
+    self: PrometheiNodeRef, cid: Cid, expiry: SecondsSince1970
+): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
+  without manifest =? await self.fetchManifest(cid), error:
+    trace "Unable to fetch manifest for cid", cid
+    return failure(error)
+
+  if err =? (await self.networkStore.ensureExpiry(cid, expiry)).errorOption:
+    error "Failed to update manifest block expiry", cid, expiry
+    return failure(err)
+
+  return success(manifest)
+
 proc findPeer*(self: PrometheiNodeRef, peerId: PeerId): Future[?PeerRecord] {.async.} =
   ## Find peer using the discovery service from the given PrometheiNode
   ##
@@ -142,44 +176,25 @@ proc connect*(
   self.switch.connect(peerId, addrs)
 
 proc updateExpiry*(
-    self: PrometheiNodeRef, manifest: Manifest, expiry: SecondsSince1970
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ?await self.repoStore.putOverlay(manifest.treeCid, expiry = expiry)
-  return success()
-
-proc updateExpiry*(
     self: PrometheiNodeRef, manifestCid: Cid, expiry: SecondsSince1970
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
-  without manifest =? await self.fetchManifest(manifestCid), error:
+  without manifest =? await self.fetchManifest(manifestCid, expiry), error:
     trace "Unable to fetch manifest for cid", manifestCid
     return failure(error)
 
-  await self.updateExpiry(manifest, expiry)
+  try:
+    let ensuringFutures = Iter[int].new(0 ..< manifest.blocksCount).mapIt(
+        self.networkStore.ensureExpiry(manifest.treeCid, it, expiry)
+      )
 
-proc updateSlotExpiry*(
-    self: PrometheiNodeRef,
-    manifestCid: Cid,
-    slotIndex: uint64,
-    expiry: SecondsSince1970,
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Update expiry for both the tree overlay and the slot overlay
-  ##
-
-  without manifest =? await self.fetchManifest(manifestCid), error:
-    trace "Unable to fetch manifest for cid", manifestCid
-    return failure(error)
-
-  # Validate before any mutations
-  if not manifest.verifiable or slotIndex.int > manifest.slotRoots.high:
-    error "Slot not found in manifest", manifestCid, slotIndex
-    return failure(newException(PrometheiError, "Slot not found in manifest"))
-
-  # Update tree overlay expiry
-  ?await self.repoStore.putOverlay(manifest.treeCid, expiry = expiry)
-
-  # Update slot overlay expiry
-  let slotRoot = manifest.slotRoots[slotIndex.int]
-  ?await self.repoStore.putOverlay(slotRoot, expiry = expiry)
+    let res = await allFinishedFailed[?!void](ensuringFutures)
+    if res.failure.len > 0:
+      trace "Some blocks failed to update expiry", len = res.failure.len
+      return failure("Some blocks failed to update expiry (" & $res.failure.len & " )")
+  except CancelledError as exc:
+    raise exc
+  except CatchableError as exc:
+    return failure(exc.msg)
 
   return success()
 
@@ -194,48 +209,41 @@ proc fetchBatched*(
   ## Fetch blocks in batches of `batchSize`
   ##
 
-  await self.repoStore.withOverlay(
-    cid,
-    status = Downloading.some,
-    body = proc(): Future[?!void] {.closure, gcsafe, async: (raises: [CancelledError]).} =
-      # When fetchLocal = false, fetch bitmap once to filter already-present blocks
-      # in memory. This avoids O(N) per-block SQLite lookups (hasBlock ->
-      # getBlocksBitmap) and replaces them with a single bitmap fetch upfront.
-      # When fetchLocal = true we include all indices regardless, so no check needed.
-      let bits =
-        if not fetchLocal:
-          ?await self.repoStore.getBlocksBitmap(cid)
-        else:
-          BitSeq.init(0)
+  # TODO: doesn't work if callee is annotated with async
+  # let
+  #   iter = iter.map(
+  #     (i: int) => self.networkStore.getBlock(BlockAddress.init(cid, i))
+  #   )
 
-      while not iter.finished:
-        var batchIndices: seq[Natural]
-        for i in 0 ..< batchSize:
-          if not iter.finished:
-            let idx = iter.next()
-            # Include index if fetchLocal is set, or if it's not yet in the bitmap
-            if fetchLocal or idx >= bits.len or not bits[idx]:
-              batchIndices.add(idx.Natural)
+  while not iter.finished:
+    let blockFutures = collect:
+      for i in 0 ..< batchSize:
+        if not iter.finished:
+          let address = BlockAddress.init(cid, iter.next())
+          if not (await address in self.networkStore) or fetchLocal:
+            self.networkStore.getBlock(address)
 
-        if batchIndices.len == 0:
-          continue
+    if blockFutures.len == 0:
+      continue
 
-        without blocks =? (await self.networkStore.getBlocks(cid, batchIndices)), err:
-          trace "Some blocks failed to fetch", err = err.msg
-          return failure(err)
+    without blockResults =? await allFinishedValues[?!bt.Block](blockFutures), err:
+      trace "Some blocks failed to fetch", err = err.msg
+      return failure(err)
 
-        if blocks.len != batchIndices.len:
-          return failure(
-            "Some blocks failed to fetch (" & $(batchIndices.len - blocks.len) &
-              " missing)"
-          )
+    let blocks = blockResults.filterIt(it.isSuccess()).mapIt(it.value)
 
-        if not onBatch.isNil and
-            batchErr =? (await onBatch(blocks.mapIt(it[1]))).errorOption:
-          return failure(batchErr)
+    let numOfFailedBlocks = blockResults.len - blocks.len
+    if numOfFailedBlocks > 0:
+      return
+        failure("Some blocks failed (Result) to fetch (" & $numOfFailedBlocks & ")")
 
-      success(),
-  )
+    if not onBatch.isNil and batchErr =? (await onBatch(blocks)).errorOption:
+      return failure(batchErr)
+
+    if not iter.finished:
+      await sleepAsync(1.millis)
+
+  success()
 
 proc fetchBatched*(
     self: PrometheiNodeRef,
@@ -273,18 +281,7 @@ proc fetchDatasetAsyncTask*(self: PrometheiNodeRef, manifest: Manifest) =
   ## Start fetching a dataset in the background.
   ## The task will be tracked and cleaned up on node shutdown.
   ##
-  proc run(): Future[void] {.async: (raises: []).} =
-    try:
-      if err =? (
-        await self.fetchBatched(
-          manifest = manifest, batchSize = DefaultFetchBatch, fetchLocal = false
-        )
-      ).errorOption:
-        error "Unable to fetch dataset", err = err.msg
-    except CancelledError as exc:
-      trace "Dataset fetch cancelled", exc = exc.msg
-
-  self.trackedFutures.track(run())
+  self.trackedFutures.track(self.fetchDatasetAsync(manifest, fetchLocal = false))
 
 proc streamSingleBlock(
     self: PrometheiNodeRef, cid: Cid
@@ -295,7 +292,7 @@ proc streamSingleBlock(
 
   let stream = BufferStream.new()
 
-  without blk =? (await self.networkStore.getBlock(cid)), err:
+  without blk =? (await self.networkStore.getBlock(BlockAddress.init(cid))), err:
     return failure(err)
 
   proc streamOneBlock(): Future[void] {.async: (raises: []).} =
@@ -321,36 +318,21 @@ proc streamEntireDataset(
   var jobs: seq[Future[void]]
   let stream = LPStream(StoreStream.new(self.networkStore, manifest, pad = false))
   if manifest.protected:
-    # For protected manifests, erasure.decode owns the overlay lifecycle
-    # via its own withOverlay(treeCid, Storing) call. It also fetches all
-    # blocks via networkStore.getBlock, so no separate fetch job is needed.
+    # Retrieve, decode and save to the local store all EС groups
     proc erasureJob(): Future[void] {.async: (raises: []).} =
       try:
+        # Spawn an erasure decoding job
         let erasure = Erasure.new(
-          self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
-          self.taskpool,
+          self.networkStore, leoEncoderProvider, leoDecoderProvider, self.taskpool
         )
-
-        if err =? (await erasure.decode(manifest)).errorOption:
-          error "Unable to erasure decode manifest", manifestCid, exc = err.msg
-          return
+        without _ =? (await erasure.decode(manifest)), error:
+          error "Unable to erasure decode manifest", manifestCid, exc = error.msg
       except CatchableError as exc:
         trace "Error erasure decoding manifest", manifestCid, exc = exc.msg
 
     jobs.add(erasureJob())
-  else:
-    proc fetchJob(): Future[void] {.async: (raises: []).} =
-      try:
-        if err =? (
-          await self.fetchBatched(
-            manifest = manifest, batchSize = DefaultFetchBatch, fetchLocal = false
-          )
-        ).errorOption:
-          error "Unable to fetch blocks", err = err.msg
-      except CancelledError as exc:
-        trace "Cancelled fetching blocks", exc = exc.msg
 
-    jobs.add(fetchJob())
+  jobs.add(self.fetchDatasetAsync(manifest, fetchLocal = false))
 
   # Monitor stream completion and cancel background jobs when done
   proc monitorStream() {.async: (raises: []).} =
@@ -383,12 +365,6 @@ proc retrieve*(
 
     return await self.streamSingleBlock(cid)
 
-  let blk = ?await self.repoStore.storeManifest(manifest)
-
-  if blk.cid != cid:
-    error "Retrieved manifest cid dont match!", original = cid, retrieved = blk.cid
-    return failure(newException(PrometheiError, "Retrieved manifest cid dont match!"))
-
   await self.streamEntireDataset(manifest, cid)
 
 proc deleteSingleBlock(
@@ -407,12 +383,32 @@ proc deleteEntireDataset(
   # Deletion is a strictly local operation
   var store = self.networkStore.localStore
 
-  without manifest =? (await self.repoStore.fetchManifest(cid)), err:
+  if not (await cid in store):
+    # As per the contract for delete*, an absent dataset is not an error.
+    return success()
+
+  without manifestBlock =? await store.getBlock(cid), err:
     return failure(err)
 
-  if err =? (await self.repoStore.dropOverlay(manifest.treeCid)).errorOption:
-    error "Error dropping manifest overlay", cid, err = err.msg
+  without manifest =? Manifest.decode(manifestBlock), err:
     return failure(err)
+
+  let runtimeQuota = initDuration(milliseconds = 100)
+  var lastIdle = getTime()
+  for i in 0 ..< manifest.blocksCount:
+    if (getTime() - lastIdle) >= runtimeQuota:
+      await idleAsync()
+      lastIdle = getTime()
+
+    if err =? (await store.delBlock(manifest.treeCid, i)).errorOption:
+      # The contract for delBlock is fuzzy, but we assume that if the block is
+      # simply missing we won't get an error. This is a best effort operation and
+      # can simply be retried.
+      error "Failed to delete block within dataset", index = i, err = err.msg
+      return failure(err)
+
+  if err =? (await store.delBlock(cid)).errorOption:
+    error "Error deleting manifest block", err = err.msg
 
   success()
 
@@ -440,12 +436,9 @@ proc store*(
     filename: ?string = string.none,
     mimetype: ?string = string.none,
     blockSize = DefaultBlockSize,
-    storeBatchSize = DefaultStoreBatch,
 ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
   ## Save stream contents as dataset with given blockSize
   ## to nodes's BlockStore, and return Cid of its manifest
-  ##
-  ## Blocks are batched for efficient storage (storeBatchSize blocks per batch).
   ##
   info "Storing data"
 
@@ -454,194 +447,44 @@ proc store*(
     dataCodec = BlockCodec
     chunker = LPStreamChunker.new(stream, chunkSize = blockSize)
 
-  defer:
+  var cids: seq[Cid]
+
+  try:
+    while (let chunk = await chunker.getBytes(); chunk.len > 0):
+      without mhash =? MultiHash.digest($hcodec, chunk).mapFailure, err:
+        return failure(err)
+
+      without cid =? Cid.init(CIDv1, dataCodec, mhash).mapFailure, err:
+        return failure(err)
+
+      without blk =? bt.Block.new(cid, chunk, verify = false):
+        return failure("Unable to init block from chunk!")
+
+      cids.add(cid)
+
+      if err =? (await self.networkStore.putBlock(blk)).errorOption:
+        error "Unable to store block", cid = blk.cid, err = err.msg
+        return failure(&"Unable to store block {blk.cid}")
+  except CancelledError as exc:
+    raise exc
+  except CatchableError as exc:
+    return failure(exc.msg)
+  finally:
     await stream.close()
 
-  proc flushBatch(
-      tmpCid: Cid, batch: sink seq[(bt.Block, Natural)]
-  ): Future[?!void] {.async: (raises: [CancelledError]).} =
-    ## Flush a batch of blocks to storage using batched putBlocks
-    if batch.len == 0:
-      return success()
+  without tree =? PrometheiTree.init(cids), err:
+    return failure(err)
 
-    let batchStart = Moment.now()
-    trace "Flushing block batch", count = batch.len
+  without treeCid =? tree.rootCid(CIDv1, dataCodec), err:
+    return failure(err)
 
-    # Convert to the format expected by putBlocks: (Block, Natural, ?PrometheiProof)
-    # We don't have proofs yet (built after tree construction), so use none
-    var items: seq[(bt.Block, Natural, ?PrometheiProof)]
-    for (blk, idx) in batch:
-      items.add((blk, idx, PrometheiProof.none))
-
-    ?await self.repoStore.putBlocks(tmpCid, items)
-    let batchDone = Moment.now()
-    trace "Batch flush complete",
-      duration = $(batchDone - batchStart), items = items.len
-
-    promethei_upload_batch_flush_duration_seconds.observe(
-      (batchDone - batchStart).milliseconds.float64 / 1000.0
-    )
-    success()
-
-  let treeCid =
-    ?await self.repoStore.withTmpOverlay(
-      body = proc(
-          tmpCid: Cid
-      ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
-        var
-          index = 0
-          cids: seq[Cid]
-          inFlight: seq[Future[?!void]] ## Track in-flight batch flushes
-          blockBatch: seq[(bt.Block, Natural)] ## (block, index) pairs for batching
-
-        proc fireBoundedBatch(
-            batch: sink seq[(bt.Block, Natural)]
-        ): Future[?!void] {.async: (raises: [CancelledError]).} =
-          # wait if at capacity before launching new batch
-          if inFlight.len >= MaxInFlightBatches:
-            # Remove first future and await it (cleanup before await to avoid leak)
-            let fut = ?catchAsync(await one(inFlight))
-            inFlight.keepItIf(FutureBase(it) != FutureBase(fut))
-            ?catchAsync(?await fut)
-
-          # Launch batch flush without awaiting (adds to window)
-          inFlight.add(flushBatch(tmpCid, move batch))
-          promethei_upload_batches_total.inc()
-          promethei_upload_active_batches.set(inFlight.len.int64)
-
-          success()
-
-        # Progressive tree builder: consume cids as blocks are produced.  One
-        # cid is held back; at EOF it is enqueued flagged `isLast`, and the
-        # builder only finishes after consuming that flagged item - no race
-        # between a done-flag and a queue that can still be draining, and no
-        # permanently blocked popFirst.
-        var
-          cidQueue = newAsyncQueue[tuple[cid: Cid, isLast: bool]](storeBatchSize)
-          allCidsQueued = false
-          held: ?Cid
-
-        let
-          treeIter = AsyncIter[Cid].new(
-            proc(): Future[Cid] {.async.} =
-              let item = await cidQueue.popFirst()
-              if item.isLast:
-                allCidsQueued = true
-              item.cid,
-            proc(): bool =
-              allCidsQueued,
-          )
-          treeFut = PrometheiTree.buildAsync(treeIter, self.taskpool)
-
-        proc enqueueCid(
-            item: tuple[cid: Cid, isLast: bool]
-        ): Future[?!void] {.async: (raises: [CancelledError]).} =
-          # Race the (potentially blocking) enqueue against the builder: a
-          # builder that failed mid-ingest stops consuming, and a full queue
-          # would then suspend the producer forever - the body defer cannot
-          # run while we are blocked here.
-          let enqFut = cidQueue.addLast(item)
-          await enqFut or treeFut
-          if enqFut.finished():
-            # The item landed in the queue. If the builder also finished in
-            # the meantime, it did so by consuming this very item (it only
-            # completes after the isLast marker), so this is a normal
-            # completion, not a premature one.
-            return success()
-
-          # The builder finished before our item could be enqueued.
-          await noCancel enqFut.cancelAndWait()
-          let treeRes = ?catchAsync(await treeFut)
-          if err =? treeRes.errorOption:
-            return failure(err)
-          return failure "Tree builder finished before upload completed"
-
-        defer:
-          if inFlight.len > 0:
-            warn "Early exit, cancelling outstanding upload batches",
-              batches = inFlight.len
-            await allFutures(inFlight.mapIt(it.cancelAndWait()))
-          # Stop the tree builder (it may be blocked on the empty queue) and
-          # release the iterator; both are no-ops on the success path.
-          await treeFut.cancelAndWait()
-          if err =? catchAsync(await treeIter.dispose()).errorOption:
-            warn "Error disposing tree iterator", err = err.msg
-
-        while true:
-          var chunk = ?await chunker.getBytes()
-          promethei_upload_bytes_total.inc(chunk.len.int64)
-          if chunk.len == 0:
-            trace "Chunker finished reading stream", read = NBytes(chunker.offset)
-            break
-
-          let
-            mhash = ?MultiHash.digest($hcodec, chunk).mapFailure
-            cid = ?Cid.init(CIDv1, dataCodec, mhash).mapFailure
-            blk = ?bt.Block.new(cid, move chunk, verify = false)
-
-          promethei_upload_blocks_total.inc()
-          cids.add(cid)
-          # Hold one back: enqueue the previous cid (non-final) when the next
-          # arrives; the final cid is enqueued flagged isLast at EOF.
-          if prev =? held:
-            ?await enqueueCid((prev, false))
-          held = some cid
-          blockBatch.add((blk, index.Natural))
-          index.inc
-
-          # Flush batch when full
-          if blockBatch.len >= storeBatchSize:
-            promethei_upload_active_batches.set(inFlight.len.int64)
-            ?await fireBoundedBatch(move blockBatch)
-            promethei_upload_active_batches.set(inFlight.len.int64)
-            blockBatch.setLen(0)
-
-        # Flush batch on last iteration
-        if blockBatch.len > 0:
-          ?await fireBoundedBatch(move blockBatch)
-          blockBatch.setLen(0)
-
-        await allFutures(inFlight)
-        for fut in inFlight:
-          if err =? catchAsync(?fut.read).errorOption:
-            error "Unable to store uploaded data", err = err.msg
-            return failure(err)
-
-        inFlight.setLen(0)
-
-        # Empty stream: matches sync PrometheiTree.init([]) behavior; the
-        # defer above cancels the tree builder blocked on the empty queue.
-        if cids.len == 0:
-          return failure "Empty leaves"
-
-        # Signal EOF to the tree builder: enqueue the held final cid flagged
-        # isLast, so the builder finishes only after consuming it.
-        if finalCid =? held:
-          ?await enqueueCid((finalCid, true))
-
-        let
-          treeStart = Moment.now()
-          tree = ?await treeFut
-          treeCid = ?tree.rootCid(CIDv1, dataCodec)
-          treeDone = Moment.now()
-
-        promethei_upload_tree_build_duration_seconds.observe(
-          (treeDone - treeStart).milliseconds.float64 / 1000.0
-        )
-
-        var proofItems: seq[(Natural, Cid, PrometheiProof)]
-        for index, cid in cids:
-          proofItems.add((index.Natural, cid, ?tree.getProof(index)))
-          if proofItems.len >= storeBatchSize:
-            ?await self.repoStore.putCidsAndProofs(tmpCid, proofItems)
-            proofItems.setLen(0)
-
-        if proofItems.len > 0:
-          ?await self.repoStore.putCidsAndProofs(tmpCid, proofItems)
-          proofItems.setLen(0)
-
-        success treeCid
-    )
+  for index, cid in cids:
+    without proof =? tree.getProof(index), err:
+      return failure(err)
+    if err =?
+        (await self.networkStore.putCidAndProof(treeCid, index, cid, proof)).errorOption:
+      # TODO add log here
+      return failure(err)
 
   let manifest = Manifest.new(
     treeCid = treeCid,
@@ -654,8 +497,9 @@ proc store*(
     mimetype = mimetype,
   )
 
-  # store the manifest
-  let manifestBlk = ?await self.repoStore.storeManifest(manifest)
+  without manifestBlk =? await self.storeManifest(manifest), err:
+    error "Unable to store manifest"
+    return failure(err)
 
   info "Stored data",
     manifestCid = manifestBlk.cid,
@@ -675,7 +519,7 @@ proc iterateManifests*(
     return
 
   for c in cidsIter:
-    if cid =? catchAsync(await c):
+    if cid =? await c:
       without blk =? await self.networkStore.getBlock(cid):
         warn "Failed to get manifest block by cid", cid
         return
@@ -686,55 +530,16 @@ proc iterateManifests*(
 
       onManifest(cid, manifest)
 
-proc ensureProtectedManifest(
-    self: PrometheiNodeRef, manifest: Manifest, ecK: uint, ecM: uint
-): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
-  # If the provided dataset is already erasure-coded,
-  # then we require that the ecK and ecM parameters are an exact match.
-  if manifest.protected:
-    if manifest.ecK != ecK.int or manifest.ecM != ecM.int:
-      return failure(
-        "Attempt to proceed with protected manifest with parameters " & $(manifest.ecK) &
-          "/" & $(manifest.ecM) & " but required: " & $ecK & "/" & $ecM
-      )
-
-    trace "Provided manifest is already protected"
-    return success manifest
-
-  # Erasure code the dataset according to provided parameters
-  let
-    erasure = Erasure.new(
-      self.networkStore.localStore, self.repoStore, leoEncoderProvider,
-      leoDecoderProvider, self.taskpool,
-    )
-    encodedManifest = ?await erasure.encode(manifest, ecK, ecM)
-
-  success encodedManifest
-
-proc ensureVerifiableManifest(
-    self: PrometheiNodeRef, manifest: Manifest, ecK: uint, ecM: uint
-): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
-  let protected = ?await self.ensureProtectedManifest(manifest, ecK, ecM)
-  # If the provided dataset is already verifiable, use it
-  if protected.verifiable:
-    trace "Provided manifest is already verifiable"
-    return success protected
-
-  # Create verifiable manifest from protected manifest
-  let builder =
-    ?Poseidon2Builder.new(self.networkStore.localStore, self.repoStore, protected)
-  return await builder.buildManifest(self.taskpool)
-
 proc setupRequest(
     self: PrometheiNodeRef,
     cid: Cid,
-    duration: StorageDuration,
+    duration: uint64,
     proofProbability: UInt256,
     nodes: uint,
     tolerance: uint,
-    pricePerBytePerSecond: TokensPerSecond,
-    collateralPerByte: Tokens,
-    expiry: StorageDuration,
+    pricePerBytePerSecond: UInt256,
+    collateralPerByte: UInt256,
+    expiry: uint64,
 ): Future[?!StorageRequest] {.async: (raises: [CancelledError]).} =
   ## Setup slots for a given dataset
   ##
@@ -759,25 +564,37 @@ proc setupRequest(
 
   let
     manifest = ?await self.fetchManifest(cid)
-    verifiable = ?await self.ensureVerifiableManifest(manifest, ecK, ecM)
-    manifestBlk = ?await self.repoStore.storeManifest(verifiable)
 
-    verifyRoot = (?verifiable.verifyRoot.fromVerifyCid).toBytes
-    slotBytes = (verifiable.blockSize.int * verifiable.numSlotBlocks).NBytes
+    # Erasure code the dataset according to provided parameters
+    erasure = Erasure.new(
+      self.networkStore.localStore, leoEncoderProvider, leoDecoderProvider,
+      self.taskpool,
+    )
 
-  let request = StorageRequest(
-    ask: StorageAsk(
-      slots: verifiable.numSlots.uint64,
-      slotSize: slotBytes.uint64,
-      duration: duration,
-      proofProbability: proofProbability,
-      pricePerBytePerSecond: pricePerBytePerSecond,
-      collateralPerByte: collateralPerByte,
-      maxSlotLoss: tolerance,
-    ),
-    content: StorageContent(cid: manifestBlk.cid, merkleRoot: verifyRoot),
-    expiry: expiry,
-  )
+    encoded = ?await erasure.encode(manifest, ecK, ecM)
+    builder = ?Poseidon2Builder.new(self.networkStore.localStore, encoded)
+    verifiable = ?await builder.buildManifest()
+    manifestBlk = ?await self.storeManifest(verifiable)
+
+    verifyRoot =
+      if builder.verifyRoot.isNone:
+        return failure("No slots root")
+      else:
+        builder.verifyRoot.get.toBytes
+
+    request = StorageRequest(
+      ask: StorageAsk(
+        slots: verifiable.numSlots.uint64,
+        slotSize: builder.slotBytes.uint64,
+        duration: duration,
+        proofProbability: proofProbability,
+        pricePerBytePerSecond: pricePerBytePerSecond,
+        collateralPerByte: collateralPerByte,
+        maxSlotLoss: tolerance,
+      ),
+      content: StorageContent(cid: manifestBlk.cid, merkleRoot: verifyRoot),
+      expiry: expiry,
+    )
 
   trace "Request created", request = $request
   success request
@@ -785,13 +602,13 @@ proc setupRequest(
 proc requestStorage*(
     self: PrometheiNodeRef,
     cid: Cid,
-    duration: StorageDuration,
+    duration: uint64,
     proofProbability: UInt256,
     nodes: uint,
     tolerance: uint,
-    pricePerBytePerSecond: TokensPerSecond,
-    collateralPerByte: Tokens,
-    expiry: StorageDuration,
+    pricePerBytePerSecond: UInt256,
+    collateralPerByte: UInt256,
+    expiry: uint64,
 ): Future[?!PurchaseId] {.async: (raises: [CancelledError]).} =
   ## Initiate a request for storage sequence, this might
   ## be a multistep procedure.
@@ -806,6 +623,7 @@ proc requestStorage*(
     proofProbability = proofProbability
     collateralPerByte = collateralPerByte
     expiry = expiry
+    now = self.clock.now
 
   trace "Received a request for storage!"
 
@@ -823,141 +641,118 @@ proc requestStorage*(
     return failure err
 
   let purchase = ?await purchasing.purchase(request)
-
-  # Clean up verifiable and slot overlays when purchase completes (success or failure).
-  # The original dataset overlay is not touched - it has its own TTL.
-  let
-    self = self
-    verifiableCid = request.content.cid
-
-  proc cleanupPurchaseOverlays() {.async: (raises: []).} =
-    try:
-      await purchase.future
-    except CatchableError as exc:
-      trace "Purchase future failed, cleaning up overlays", error = exc.msg
-
-    try:
-      without manifest =? await self.fetchManifest(verifiableCid), err:
-        warn "Unable to fetch manifest for purchase cleanup",
-          cid = verifiableCid, error = err.msg
-        return
-
-      for slotRoot in manifest.slotRoots:
-        if err =? (await self.repoStore.dropOverlay(slotRoot)).errorOption:
-          warn "Error dropping slot overlay", slotRoot, error = err.msg
-
-      if err =? (await self.repoStore.dropOverlay(manifest.treeCid)).errorOption:
-        warn "Error dropping verifiable overlay",
-          treeCid = manifest.treeCid, error = err.msg
-    except CancelledError:
-      trace "Purchase overlay cleanup cancelled"
-
-  self.trackedFutures.track(cleanupPurchaseOverlays())
-
   success purchase.id
 
-proc validateVerifiableManifest(manifest: Manifest, slotSize: uint64): ?!void =
-  if not manifest.verifiable:
-    return failure("Received manifest type is not verifiable")
-  if manifest.slotSize.uint64 != slotSize:
-    return failure("Received manifest slotSize does not match storage request slotSize")
-  return success()
-
-proc storeSlot*(
+proc onStore(
     self: PrometheiNodeRef,
-    cid: Cid,
-    slotIndex: uint64,
-    slotSize: uint64,
+    request: StorageRequest,
     expiry: SecondsSince1970,
-    repair: bool,
+    slotIdx: uint64,
+    isRepairing: bool = false,
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ## store data in local storage
   ##
+
+  let cid = request.content.cid
+
   logScope:
     cid = $cid
-    slotIdx = slotIndex
-    slotSize = slotSize
+    slotIdx = slotIdx
 
   trace "Received a request to store a slot"
-  without manifest =? (await self.fetchManifest(cid)), err:
+
+  without manifest =? (await self.fetchManifest(cid, expiry)), err:
     error "Unable to fetch manifest for cid", cid, err = err.msg
     return failure(err)
 
-  if err =? validateVerifiableManifest(manifest, slotSize).errorOption:
-    error "Validation of verifiable manifest failed", err = err.msg
-    return failure(err)
-
-  if err =? (await self.updateExpiry(manifest, expiry)).errorOption:
-    error "Unable to update manifest expiry", cid, err = err.msg
-    return failure(err)
-
   without builder =?
-    Poseidon2Builder.new(
-      self.networkStore, self.repoStore, manifest, manifest.verifiableStrategy
-    ), err:
+    Poseidon2Builder.new(self.networkStore, manifest, manifest.verifiableStrategy), err:
     error "Unable to create slots builder", err = err.msg
     return failure(err)
 
-  if slotIndex > manifest.slotRoots.high.uint64:
-    error "Slot index not in manifest"
+  if slotIdx > manifest.slotRoots.high.uint64:
+    error "Slot index not in manifest", slotIdx
     return failure(newException(PrometheiError, "Slot index not in manifest"))
 
-  if slotIndex > int.high.uint64:
-    error "Cannot cast slot index to int", slotIndex = slotIndex
+  proc updateExpiry(
+      blocks: seq[bt.Block]
+  ): Future[?!void] {.async: (raises: [CancelledError]).} =
+    trace "Updating expiry for blocks", blocks = blocks.len
+
+    let ensureExpiryFutures =
+      blocks.mapIt(self.networkStore.ensureExpiry(it.cid, expiry))
+
+    let res = await allFinishedFailed[?!void](ensureExpiryFutures)
+    if res.failure.len > 0:
+      error "Some blocks failed to update expiry", len = res.failure.len
+      return failure("Some blocks failed to update expiry (" & $res.failure.len & " )")
+
+    return success()
+
+  if slotIdx > int.high.uint64:
+    error "Cannot cast slot index to int", slotIndex = slotIdx
     return failure(newException(PrometheiError, "Cannot cast slot index to int"))
 
-  without blksIter =? manifest.getSlotBlockIterator(slotIndex.int), err:
+  without blksIter =? manifest.getSlotBlockIterator(slotIdx.int), err:
     error "Unable to get indices from strategy", err = err.msg
     return failure(err)
 
-  if repair:
-    trace "Start repairing slot", slotIdx
-    let erasure = Erasure.new(
-      self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
-      self.taskpool,
-    )
-    if err =? (await erasure.repair(manifest)).errorOption:
-      error "Unable to erasure decode repairing manifest",
-        cid = manifest.treeCid, exc = err.msg
-      return failure(err)
-
-    while not blksIter.finished:
-      without blk =? await self.networkStore.getBlock(manifest.treeCid, blksIter.next()),
-        err:
-        error "Unable to get slot block after repair"
+  if isRepairing:
+    trace "start repairing slot", slotIdx
+    try:
+      let erasure = Erasure.new(
+        self.networkStore, leoEncoderProvider, leoDecoderProvider, self.taskpool
+      )
+      if err =? (await erasure.repair(manifest)).errorOption:
+        error "Unable to erasure decode repairing manifest",
+          cid = manifest.treeCid, exc = err.msg
         return failure(err)
+
+      # Iterate the slot blocks. Provide them to the updateExpiry callback.
+      while not blksIter.finished:
+        without blk =?
+          await self.networkStore.getBlock(manifest.treeCid, blksIter.next()), err:
+          error "Unable to get slot block after repair"
+          return failure(err)
+        if err =? (await updateExpiry(@[blk])).errorOption:
+          error "Unable to update expiry for slot block after repair"
+          return failure(err)
+    except CatchableError as exc:
+      error "Error erasure decoding repairing manifest",
+        cid = manifest.treeCid, exc = exc.msg
+      return failure(exc.msg)
   else:
-    if err =? (await self.fetchBatched(manifest.treeCid, blksIter)).errorOption:
+    if err =? (
+      await self.fetchBatched(manifest.treeCid, blksIter, onBatch = updateExpiry)
+    ).errorOption:
       error "Unable to fetch blocks", err = err.msg
       return failure(err)
 
-  without slotRoot =? (await builder.buildSlot(slotIndex.int, self.taskpool)), err:
+  without slotRoot =? (await builder.buildSlot(slotIdx.int)), err:
     error "Unable to build slot", err = err.msg
     return failure(err)
 
-  if cid =? slotRoot.toSlotCid() and cid != manifest.slotRoots[slotIndex]:
+  if cid =? slotRoot.toSlotCid() and cid != manifest.slotRoots[slotIdx]:
     error "Slot root mismatch",
-      manifest = manifest.slotRoots[slotIndex.int], recovered = slotRoot.toSlotCid()
+      manifest = manifest.slotRoots[slotIdx.int], recovered = slotRoot.toSlotCid()
     return failure(newException(PrometheiError, "Slot root mismatch"))
-
-  # Track verifiable manifest CID on the slot overlay for cleanup
-  discard
-    ?await self.repoStore.storeVerifiableManifest(
-      manifest, slotIdx = slotIndex.Natural.some, expiry = expiry
-    )
 
   trace "Slot successfully retrieved and reconstructed"
 
   return success()
 
-proc proveSlot*(
-    self: PrometheiNodeRef, cid: Cid, slotIdx: uint64, challenge: ProofChallenge
+proc onProve(
+    self: PrometheiNodeRef, slot: Slot, challenge: ProofChallenge, period: Period
 ): Future[?!Groth16Proof] {.async: (raises: [CancelledError]).} =
-  ## Generates a proof for a given slot and challenge
+  ## Generats a proof for a given slot and challenge
   ##
 
+  let
+    cidStr = $slot.request.content.cid
+    slotIdx = slot.slotIndex
+
   logScope:
-    cid = $cid
+    cid = cidStr
     slot = slotIdx
     challenge = challenge
 
@@ -967,11 +762,10 @@ proc proveSlot*(
     trace "Prover enabled"
 
     let
-      manifest = ?await self.repoStore.fetchManifest(cid)
+      cid = ?Cid.init(cidStr).mapFailure
+      manifest = ?await self.fetchManifest(cid)
       builder =
-        ?Poseidon2Builder.new(
-          self.networkStore, self.repoStore, manifest, manifest.verifiableStrategy
-        )
+        ?Poseidon2Builder.new(self.networkStore, manifest, manifest.verifiableStrategy)
       sampler = ?Poseidon2Sampler.new(slotIdx, self.networkStore, builder)
 
     when defined(verify_circuit):
@@ -988,42 +782,30 @@ proc proveSlot*(
 
     trace "Proof generated successfully", proof
 
+    # Update proofs/period metric:
+    if self.currentPeriod != period:
+      if self.currentPeriod > 0:
+        debug "Generated proofs per period",
+          numProofs = self.numProofs, period = self.currentPeriod
+        promethei_proofs_per_period.set(self.numProofs)
+      self.numProofs = 1
+      self.currentPeriod = period
+    else:
+      inc self.numProofs
+
     success proof
   else:
     warn "Prover not enabled"
     failure "Prover not enabled"
 
-proc deleteSlot*(
-    self: PrometheiNodeRef, cid: Cid, slotIdx: uint64
+proc onExpiryUpdate(
+    self: PrometheiNodeRef, rootCid: Cid, expiry: SecondsSince1970
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Handle slot failure - drop the slot overlay so proving stops for this slot.
-  ## The manifest tree overlay is deliberately NOT touched here - it is shared
-  ## by all slots under the same manifest. Dropping it would break local block
-  ## resolution for other active slots from the same request. The tree overlay
-  ## expires via maintenance when its TTL passes, or is cleaned up in bulk by
-  ## cleanupPurchaseOverlays when the entire purchase completes.
-  ##
-  logScope:
-    cid = $cid
-    slot = slotIdx
+  return await self.updateExpiry(rootCid, expiry)
 
-  trace "Deleting slot", slotIdx
-
-  let manifest = ?await self.fetchManifest(cid)
-
-  if not manifest.verifiable:
-    warn "Attempting to fail a slot with a non-verifiable manifest", cid, slotIdx
-
-  let slotCid = manifest.slotRoots[slotIdx]
-
-  # Delete slot overlay only - tree overlay is shared and left intact
-  if err =? (await self.repoStore.dropOverlay(slotCid)).errorOption:
-    warn "Error marking slot overlay failed", err = err.msg
-    return failure err
-
-  trace "Slot marked as failed"
-
-  return success()
+proc onClear(self: PrometheiNodeRef, request: StorageRequest, slotIndex: uint64) =
+  # TODO: remove data from local storage
+  discard
 
 proc start*(self: PrometheiNodeRef) {.async.} =
   if not self.engine.isNil:
@@ -1032,7 +814,31 @@ proc start*(self: PrometheiNodeRef) {.async.} =
   if not self.discovery.isNil:
     await self.discovery.start()
 
+  if not self.clock.isNil:
+    await self.clock.start()
+
   if marketplace =? self.marketplace:
+    marketplace.sales.onStore = proc(
+        request: StorageRequest,
+        expiry: SecondsSince1970,
+        slot: uint64,
+        isRepairing: bool = false,
+    ): Future[?!void] {.async: (raw: true, raises: [CancelledError]).} =
+      self.onStore(request, expiry, slot, isRepairing)
+
+    marketplace.sales.onExpiryUpdate = proc(
+        rootCid: Cid, expiry: SecondsSince1970
+    ): Future[?!void] {.async: (raw: true, raises: [CancelledError]).} =
+      self.onExpiryUpdate(rootCid, expiry)
+
+    marketplace.sales.onClear = proc(request: StorageRequest, slotIndex: uint64) =
+      self.onClear(request, slotIndex)
+
+    marketplace.sales.onProve = proc(
+        slot: Slot, challenge: ProofChallenge, period: Period
+    ): Future[?!Groth16Proof] {.async: (raw: true, raises: [CancelledError]).} =
+      self.onProve(slot, challenge, period)
+
     if error =? (await marketplace.start()).errorOption:
       error "Unable to start marketplace", error = error.msg
 
@@ -1053,6 +859,9 @@ proc stop*(self: PrometheiNodeRef) {.async.} =
   if marketplace =? self.marketplace:
     await marketplace.stop()
 
+  if not self.clock.isNil:
+    await self.clock.stop()
+
   if not self.networkStore.isNil:
     await self.networkStore.close
 
@@ -1060,7 +869,6 @@ proc new*(
     T: type PrometheiNodeRef,
     switch: Switch,
     networkStore: NetworkStore,
-    repoStore: RepoStore,
     engine: BlockExcEngine,
     discovery: Discovery,
     taskpool: Taskpool,
@@ -1073,7 +881,6 @@ proc new*(
   PrometheiNodeRef(
     switch: switch,
     networkStore: networkStore,
-    repoStore: repoStore,
     engine: engine,
     prover: prover,
     discovery: discovery,

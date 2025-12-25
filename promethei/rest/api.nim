@@ -11,7 +11,10 @@
 
 import std/sequtils
 import std/mimetypes
-import std/os
+import std/tables
+import std/strutils
+import std/algorithm
+from std/json import parseJson, JsonParsingError
 
 import pkg/questionable
 import pkg/questionable/results
@@ -21,33 +24,35 @@ import pkg/metrics except toJson
 import pkg/stew/base10
 import pkg/stew/byteutils
 import pkg/confutils
-import pkg/stint
 
 import pkg/libp2p
 import pkg/libp2p/routing_record
-import pkg/kvstore
 import pkg/prometheidht/discv5/spr as spr
 
 import ../logutils
 import ../node
+import ../directorynode
 import ../blocktype
 import ../conf
 import ../erasure/erasure
 import ../manifest
+import ../manifest/directory
 import ../streams/asyncstreamwrapper
 import ../stores
 import ../marketplace
+import ../marketplace/abstractmarketplace
+import ../purchasing
+import ../sales/reservations
 
 import ./coders
 import ./json
+import ./directoryhtml
 
 logScope:
   topics = "promethei restapi"
 
 declareCounter(promethei_api_uploads, "promethei API uploads")
 declareCounter(promethei_api_downloads, "promethei API downloads")
-
-const DefaultStreamBatch* = 128 # Number of blocks to fetch per stream read
 
 proc validate(pattern: string, value: string): int {.gcsafe, raises: [Defect].} =
   0
@@ -64,24 +69,6 @@ proc formatManifestBlocks(node: PrometheiNodeRef): Future[JsonNode] {.async.} =
   await node.iterateManifests(addManifest)
 
   return %RestContentList.init(content)
-
-proc formatDatasetStatus(
-    node: PrometheiNodeRef, repostore: RepoStore, cid: Cid
-): Future[?!JsonNode] {.async.} =
-  without manifest =? (await node.fetchManifest(cid)), err:
-    error "Failed to fetch manifest", err = err.msg
-    return failure(err)
-
-  without overlay =? (await repostore.getOverlay(manifest.treeCid)), err:
-    error "Failed to fetch overlay", err = err.msg
-    return failure(err)
-
-  let allIndices = toSeq(0.Natural ..< manifest.blocksCount.Natural)
-  without hasBlocks =? (await repostore.hasBlocks(manifest.treeCid, allIndices)), err:
-    error "Failed to run hasBlocks", err = err.msg
-    return failure(err)
-
-  return success(%RestDatasetStatus.init(cid, overlay, hasBlocks))
 
 proc isPending(resp: HttpResponseRef): bool =
   ## Checks that an HttpResponseRef object is still pending; i.e.,
@@ -145,7 +132,7 @@ proc retrieveCid(
 
     while not stream.atEof:
       var
-        buff = newSeqUninitialized[byte](DefaultStreamBatch * DefaultBlockSize.int)
+        buff = newSeqUninitialized[byte](DefaultBlockSize.int)
         len = await stream.readOnce(addr buff[0], buff.len)
 
       buff.setLen(len)
@@ -233,6 +220,19 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
     if mimetype.get() != "":
       let mimetypeVal = mimetype.get()
       var m = newMimetypes()
+      # Add formats missing from std/mimetypes
+      m.register("xml", "application/xml")
+      m.register("xml", "text/xml")
+      m.register("flac", "audio/flac")
+      m.register("mp3", "audio/mpeg")
+      m.register("opus", "audio/opus")
+      m.register("m4a", "audio/mp4")
+      m.register("m4a", "audio/x-m4a")
+      m.register("aac", "audio/aac")
+      m.register("wma", "audio/x-ms-wma")
+      m.register("mkv", "video/x-matroska")
+      m.register("webm", "video/webm")
+      m.register("ts", "video/mp2t")
       let extension = m.getExt(mimetypeVal, "")
       if extension == "":
         return RestApiResponse.error(
@@ -245,8 +245,13 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
     let contentDisposition = request.headers.getString(ContentDispositionHeader)
     let filename = getFilenameFromContentDisposition(contentDisposition)
 
-    if filename.isSome and not isValidFilename(filename.get()):
-      return RestApiResponse.error(Http422, "The filename is not valid.")
+    # Validate filename - only block null bytes and literal "." or ".."
+    # Forward slashes are allowed (relative paths for directory uploads like "Album/track.mp3")
+    # Backslashes are normalized to forward slashes
+    if filename.isSome:
+      let fname = filename.get().replace('\\', '/')
+      if fname.len == 0 or fname == "." or fname == ".." or '\0' in fname:
+        return RestApiResponse.error(Http422, "The filename is not valid.")
 
     # Here we could check if the extension matches the filename if needed
 
@@ -260,10 +265,6 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
           mimetype = mimetype,
         )
       ), error:
-        if error of QuotaNotEnoughError:
-          return RestApiResponse.error(Http413, error.msg)
-        if error of KVConflictError:
-          return RestApiResponse.error(Http409, error.msg)
         error "Error uploading file", exc = error.msg
         return RestApiResponse.error(Http500, error.msg)
 
@@ -283,17 +284,227 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
     let json = await formatManifestBlocks(node)
     return RestApiResponse.response($json, contentType = "application/json")
 
-  router.api(MethodGet, "/api/promethei/v1/data/{cid}/status") do(
-    cid: Cid, resp: HttpResponseRef
+  router.api(MethodOptions, "/api/promethei/v1/directory") do(
+    resp: HttpResponseRef
   ) -> RestApiResponse:
-    if cid.isErr:
-      return RestApiResponse.error(Http400, $cid.error())
+    if corsOrigin =? allowedOrigin:
+      resp.setCorsHeaders("POST", corsOrigin)
+      resp.setHeader(
+        "Access-Control-Allow-Headers", "content-type, x-pubkey"
+      )
 
-    without json =? (await formatDatasetStatus(node, repostore, cid.get())), err:
-      error "Failed create RestDatasetStatus object", err = err.msg
-      return RestApiResponse.error(Http404, err.msg)
+    resp.status = Http204
+    await resp.sendBody("")
 
-    return RestApiResponse.response($json, contentType = "application/json")
+  router.rawApi(MethodPost, "/api/promethei/v1/directory") do() -> RestApiResponse:
+    ## Finalize a directory from pre-uploaded files
+    ##
+    ## Accepts JSON with array of entries, each containing:
+    ##   - path: string (e.g., "folder/file.mp3")
+    ##   - cid: string (CID of already-uploaded file)
+    ##   - size: int (file size in bytes)
+    ##   - mimetype: string (optional)
+    ##
+    ## Returns JSON with root directory CID
+    ##
+    trace "Handling directory finalize"
+
+    var headers = buildCorsHeaders("POST", allowedOrigin)
+
+    # Parse JSON body
+    let body = await request.getBody()
+    var jsonBody: JsonNode
+    try:
+      jsonBody = parseJson(cast[string](body))
+    except JsonParsingError:
+      return RestApiResponse.error(
+        Http400, "Invalid JSON body", headers = headers
+      )
+
+    # Validate structure
+    if not jsonBody.hasKey("entries"):
+      return RestApiResponse.error(
+        Http400, "Missing 'entries' array in request body", headers = headers
+      )
+
+    let entriesJson = jsonBody["entries"]
+    if entriesJson.kind != JArray:
+      return RestApiResponse.error(
+        Http400, "'entries' must be an array", headers = headers
+      )
+
+    if entriesJson.len == 0:
+      return RestApiResponse.error(
+        Http400, "No entries provided", headers = headers
+      )
+
+    # Parse entries
+    type InputEntry = object
+      path: string
+      cid: Cid
+      size: NBytes
+      mimetype: ?string
+
+    var inputEntries: seq[InputEntry]
+
+    for i, entry in entriesJson.elems:
+      if entry.kind != JObject:
+        return RestApiResponse.error(
+          Http400, "Entry " & $i & " must be an object", headers = headers
+        )
+
+      if not entry.hasKey("path") or not entry.hasKey("cid"):
+        return RestApiResponse.error(
+          Http400, "Entry " & $i & " missing required 'path' or 'cid'", headers = headers
+        )
+
+      let pathStr = entry["path"].getStr()
+      let cidStr = entry["cid"].getStr()
+
+      # Validate and normalize path
+      var normalPath = pathStr.replace("\\", "/")
+      while normalPath.len > 0 and normalPath[0] == '/':
+        normalPath = normalPath[1..^1]
+
+      if ".." in normalPath:
+        return RestApiResponse.error(
+          Http400, "Invalid path (directory traversal not allowed): " & pathStr,
+          headers = headers,
+        )
+
+      if normalPath.len == 0:
+        continue
+
+      # Parse CID
+      without cidVal =? Cid.init(cidStr).mapFailure, err:
+        return RestApiResponse.error(
+          Http400, "Entry " & $i & " has invalid CID: " & cidStr, headers = headers
+        )
+
+      let size = NBytes(entry.getOrDefault("size").getInt(0))
+      let mimetypeOpt =
+        if entry.hasKey("mimetype") and entry["mimetype"].getStr().len > 0:
+          entry["mimetype"].getStr().some
+        else:
+          string.none
+
+      inputEntries.add(InputEntry(
+        path: normalPath,
+        cid: cidVal,
+        size: size,
+        mimetype: mimetypeOpt,
+      ))
+
+    trace "Parsed directory finalize request", entries = inputEntries.len
+
+    # Build directory tree from bottom up
+    # Group files by their parent directory
+    type DirNode = ref object
+      name: string
+      files: seq[tuple[name: string, cid: Cid, size: NBytes, mimetype: ?string]]
+      subdirs: Table[string, DirNode]
+
+    var root = DirNode(name: "", subdirs: initTable[string, DirNode]())
+
+    for entry in inputEntries:
+      let pathParts = entry.path.split('/')
+      var current = root
+
+      # Navigate/create directory structure
+      for i in 0 ..< pathParts.len - 1:
+        let part = pathParts[i]
+        if part notin current.subdirs:
+          current.subdirs[part] = DirNode(
+            name: part,
+            subdirs: initTable[string, DirNode](),
+          )
+        current = current.subdirs[part]
+
+      # Add file to current directory
+      current.files.add((
+        name: pathParts[^1],
+        cid: entry.cid,
+        size: entry.size,
+        mimetype: entry.mimetype,
+      ))
+
+    # If root has exactly one subdir and no files, promote that subdir to root
+    # This makes "MyAlbum/track1.mp3" become a directory named "MyAlbum" at root
+    # instead of having an anonymous root containing "MyAlbum"
+    while root.subdirs.len == 1 and root.files.len == 0:
+      for name, subdir in root.subdirs.pairs:
+        root = subdir
+        break
+
+    # Recursively create directory manifests from leaves to root
+    proc buildDirManifest(dirNode: DirNode): Future[?!Cid] {.async.} =
+      var entries: seq[DirectoryEntry]
+
+      # First, process subdirectories (they need their CIDs computed first)
+      for name, subdir in dirNode.subdirs.pairs:
+        without subdirCid =? (await buildDirManifest(subdir)), err:
+          return failure(err)
+
+        # We need the total size of the subdirectory
+        without subdirManifest =? (
+          await fetchDirectoryManifest(node.networkStore, subdirCid)
+        ), err:
+          return failure(err)
+
+        entries.add(DirectoryEntry.new(
+          name = name,
+          cid = subdirCid,
+          size = subdirManifest.totalSize,
+          isDirectory = true,
+        ))
+
+      # Add files
+      for f in dirNode.files:
+        entries.add(DirectoryEntry.new(
+          name = f.name,
+          cid = f.cid,
+          size = f.size,
+          isDirectory = false,
+          mimetype = if f.mimetype.isSome: f.mimetype.unsafeGet() else: "",
+        ))
+
+      # Sort entries: directories first, then files, alphabetically
+      entries.sort(proc(a, b: DirectoryEntry): int =
+        if a.isDirectory and not b.isDirectory:
+          return -1
+        elif not a.isDirectory and b.isDirectory:
+          return 1
+        else:
+          return cmp(a.name, b.name)
+      )
+
+      let dirManifest = DirectoryManifest.new(
+        entries = entries,
+        name = dirNode.name,
+      )
+
+      without blk =? (await storeDirectoryManifest(node.networkStore, dirManifest)), err:
+        return failure(err)
+
+      return blk.cid.success
+
+    without rootCid =? (await buildDirManifest(root)), err:
+      error "Error building directory manifest", exc = err.msg
+      return RestApiResponse.error(Http500, err.msg, headers = headers)
+
+    without rootDir =? (await fetchDirectoryManifest(node.networkStore, rootCid)), err:
+      return RestApiResponse.error(Http500, err.msg, headers = headers)
+
+    promethei_api_uploads.inc()
+
+    # Build JSON response directly (RestDirectoryUploadResponse causes serialization issues)
+    var responseJson = newJObject()
+    responseJson["cid"] = %rootCid
+    responseJson["totalSize"] = %(rootDir.totalSize.int)
+    responseJson["filesCount"] = %rootDir.filesCount
+    return RestApiResponse.response(
+      $responseJson, contentType = "application/json", headers = headers
+    )
 
   router.api(MethodOptions, "/api/promethei/v1/data/{cid}") do(
     cid: Cid, resp: HttpResponseRef
@@ -309,23 +520,63 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
   ) -> RestApiResponse:
     var headers = buildCorsHeaders("GET", allowedOrigin)
 
-    ## Download a file from the local node in a streaming
-    ## manner
+    ## Download a file from the local node in a streaming manner,
+    ## or browse a directory manifest (returning HTML or JSON)
     if cid.isErr:
       return RestApiResponse.error(Http400, $cid.error(), headers = headers)
+
+    let cidVal = cid.get()
 
     if corsOrigin =? allowedOrigin:
       resp.setCorsHeaders("GET", corsOrigin)
       resp.setHeader("Access-Control-Headers", "X-Requested-With")
 
-    await node.retrieveCid(cid.get(), local = true, resp = resp)
+    # Check if this is a directory manifest
+    without isDir =? cidVal.isDirectory, err:
+      return RestApiResponse.error(Http400, err.msg, headers = headers)
+
+    if isDir:
+      # This is a directory - return HTML or JSON listing
+      without directory =? (await fetchDirectoryManifest(node.networkStore, cidVal)), err:
+        return RestApiResponse.error(Http404, err.msg, headers = headers)
+
+      # Check Accept header to determine response format
+      let acceptHeader = request.headers.getString("Accept")
+
+      if "text/html" in acceptHeader or "text/*" in acceptHeader or "*/*" in acceptHeader:
+        # Return HTML directory listing
+        let html = generateDirectoryHtml(directory, cidVal)
+        return RestApiResponse.response(html, contentType = "text/html; charset=utf-8")
+      else:
+        # Return JSON (build directly to avoid serialization issues with RestDirectory)
+        var entriesJson = newJArray()
+        for entry in directory.entries:
+          var entryJson = newJObject()
+          entryJson["name"] = %entry.name
+          entryJson["cid"] = %($entry.cid)
+          entryJson["size"] = %(entry.size.int)
+          entryJson["isDirectory"] = %entry.isDirectory
+          if entry.mimetype.len > 0:
+            entryJson["mimetype"] = %entry.mimetype
+          entriesJson.add(entryJson)
+
+        var json = newJObject()
+        json["cid"] = %($cidVal)
+        if directory.name.len > 0:
+          json["name"] = %directory.name
+        json["totalSize"] = %(directory.totalSize.int)
+        json["entries"] = entriesJson
+        return RestApiResponse.response($json, contentType = "application/json", headers = headers)
+
+    # Regular file - stream it
+    await node.retrieveCid(cidVal, local = true, resp = resp)
 
   router.api(MethodDelete, "/api/promethei/v1/data/{cid}") do(
     cid: Cid, resp: HttpResponseRef
   ) -> RestApiResponse:
     ## Deletes either a single block or an entire dataset
-    ## from the local node. Returns 404 if the dataset
-    ## is not locally available.
+    ## from the local node. Does nothing and returns 204
+    ## if the dataset is not locally available.
     ##
     var headers = buildCorsHeaders("DELETE", allowedOrigin)
 
@@ -333,8 +584,6 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
       return RestApiResponse.error(Http400, $cid.error(), headers = headers)
 
     if err =? (await node.delete(cid.get())).errorOption:
-      if err of BlockNotFoundError:
-        return RestApiResponse.error(Http404, err.msg, headers = headers)
       return RestApiResponse.error(Http500, err.msg, headers = headers)
 
     if corsOrigin =? allowedOrigin:
@@ -410,6 +659,91 @@ proc initDataApi(node: PrometheiNodeRef, repoStore: RepoStore, router: var RestR
         quotaReservedBytes: repoStore.quotaReservedBytes,
       )
     return RestApiResponse.response($json, contentType = "application/json")
+
+  # Path resolution within directories
+  router.api(MethodGet, "/api/promethei/v1/data/{cid}/path") do(
+    cid: Cid, p: Option[string], resp: HttpResponseRef
+  ) -> RestApiResponse:
+    ## Access a file or subdirectory within a directory by path
+    ## Use query parameter ?p=images/logo.png
+    ##
+    var headers = buildCorsHeaders("GET", allowedOrigin)
+
+    if cid.isErr:
+      return RestApiResponse.error(Http400, $cid.error(), headers = headers)
+
+    let cidVal = cid.get()
+
+    # Get path from query parameter (Option[Result[string, cstring]])
+    var pathStr = ""
+    if pOpt =? p:
+      if pRes =? pOpt:
+        pathStr = pRes
+    let pathParts = if pathStr.len > 0: pathStr.split('/') else: @[]
+
+    if pathParts.len == 0:
+      # Redirect to directory listing
+      return RestApiResponse.redirect(
+        Http307, "/api/promethei/v1/data/" & $cidVal
+      )
+
+    # Check if this is a directory manifest
+    without isDir =? cidVal.isDirectory, err:
+      return RestApiResponse.error(Http400, err.msg, headers = headers)
+
+    if not isDir:
+      return RestApiResponse.error(
+        Http400, "CID is not a directory manifest", headers = headers
+      )
+
+    without directory =? (await fetchDirectoryManifest(node.networkStore, cidVal)), err:
+      return RestApiResponse.error(Http404, err.msg, headers = headers)
+
+    # Resolve the path
+    var currentDir = directory
+    var currentCid = cidVal
+
+    for i, part in pathParts:
+      if part == "":
+        continue
+
+      var foundEntry: DirectoryEntry
+      if not currentDir.findEntry(part, foundEntry):
+        return RestApiResponse.error(
+          Http404, "Path not found: " & part, headers = headers
+        )
+
+      if i == pathParts.high:
+        # This is the last path component
+        if foundEntry.isDirectory:
+          # Redirect to directory listing
+          return RestApiResponse.redirect(
+            Http307, "/api/promethei/v1/data/" & $foundEntry.cid
+          )
+        else:
+          # Serve the file
+          if corsOrigin =? allowedOrigin:
+            resp.setCorsHeaders("GET", corsOrigin)
+            resp.setHeader("Access-Control-Headers", "X-Requested-With")
+
+          resp.setHeader("Access-Control-Expose-Headers", "Content-Disposition")
+          await node.retrieveCid(foundEntry.cid, local = true, resp = resp)
+          return RestApiResponse.response("")
+      else:
+        # Navigate into subdirectory
+        if not foundEntry.isDirectory:
+          return RestApiResponse.error(
+            Http400, "Path component is not a directory: " & part, headers = headers
+          )
+
+        without subDir =? (await fetchDirectoryManifest(node.networkStore, foundEntry.cid)), err:
+          return RestApiResponse.error(Http404, err.msg, headers = headers)
+
+        currentDir = subDir
+        currentCid = foundEntry.cid
+
+    # Should not reach here
+    return RestApiResponse.error(Http500, "Unexpected error", headers = headers)
 
 proc initSalesApi(node: PrometheiNodeRef, router: var RestRouter) =
   let allowedOrigin = router.allowedOrigin
@@ -504,23 +838,28 @@ proc initSalesApi(node: PrometheiNodeRef, router: var RestRouter) =
       without restAv =? RestAvailability.fromJson(body), error:
         return RestApiResponse.error(Http400, error.msg, headers = headers)
 
-      if restAv.maximumDuration.u64 == 0:
+      if restAv.maximumDuration == 0:
         return RestApiResponse.error(
           Http422, "maximumDuration must be larger than zero", headers = headers
         )
 
-      if restAv.minimumPricePerBytePerSecond.u256 == 0.u256:
+      if restAv.minimumPricePerBytePerSecond == 0:
         return RestApiResponse.error(
           Http422,
           "minimumPricePerBytePerSecond must be larger than zero",
           headers = headers,
         )
 
-      if restAv.maximumCollateralPerByte.u256 == 0.u256:
+      if restAv.maximumCollateralPerByte == 0:
         return RestApiResponse.error(
           Http422,
           "maximumCollateralPerByte must be larger than zero",
           headers = headers,
+        )
+
+      if availableUntil =? restAv.availableUntil and availableUntil < 0:
+        return RestApiResponse.error(
+          Http422, "availableUntil must not be negative", headers = headers
         )
 
       let terms = AvailabilityTerms(
@@ -537,6 +876,15 @@ proc initSalesApi(node: PrometheiNodeRef, router: var RestRouter) =
     except CatchableError as exc:
       trace "Excepting processing request", exc = exc.msg
       return RestApiResponse.error(Http500, headers = headers)
+
+  router.api(MethodOptions, "/api/promethei/v1/sales/availability/{id}") do(
+    id: AvailabilityId, resp: HttpResponseRef
+  ) -> RestApiResponse:
+    if corsOrigin =? allowedOrigin:
+      resp.setCorsHeaders("PATCH", corsOrigin)
+
+    resp.status = Http204
+    await resp.sendBody("")
 
 proc initPurchasingApi(node: PrometheiNodeRef, router: var RestRouter) =
   let allowedOrigin = router.allowedOrigin
@@ -572,7 +920,7 @@ proc initPurchasingApi(node: PrometheiNodeRef, router: var RestRouter) =
 
       let expiry = params.expiry
 
-      if expiry.u64 == 0 or expiry >= params.duration:
+      if expiry <= 0 or expiry >= params.duration:
         return RestApiResponse.error(
           Http422,
           "Expiry must be greater than zero and less than the request's duration",
@@ -584,23 +932,24 @@ proc initPurchasingApi(node: PrometheiNodeRef, router: var RestRouter) =
           Http422, "Proof probability must be greater than zero", headers = headers
         )
 
-      if params.collateralPerByte.u256 == 0:
+      if params.collateralPerByte <= 0:
         return RestApiResponse.error(
           Http422, "Collateral per byte must be greater than zero", headers = headers
         )
 
-      if params.pricePerBytePerSecond.u256 == 0:
+      if params.pricePerBytePerSecond <= 0:
         return RestApiResponse.error(
           Http422,
           "Price per byte per second must be greater than zero",
           headers = headers,
         )
 
-      let durationLimit = marketplace.purchasing.durationLimit
-      if params.duration > durationLimit:
+      let requestDurationLimit =
+        await marketplace.purchasing.marketplace.requestDurationLimit
+      if params.duration > requestDurationLimit:
         return RestApiResponse.error(
           Http422,
-          "Duration exceeds limit of " & $durationLimit & " seconds",
+          "Duration exceeds limit of " & $requestDurationLimit & " seconds",
           headers = headers,
         )
 
@@ -646,7 +995,7 @@ proc initPurchasingApi(node: PrometheiNodeRef, router: var RestRouter) =
 
         return RestApiResponse.error(Http500, error.msg, headers = headers)
 
-      return RestApiResponse.response($purchaseId)
+      return RestApiResponse.response(purchaseId.toHex)
     except CatchableError as exc:
       trace "Excepting processing request", exc = exc.msg
       return RestApiResponse.error(Http500, headers = headers)
@@ -877,7 +1226,7 @@ proc initDebugApi(node: PrometheiNodeRef, conf: NodeConf, router: var RestRouter
           valueInt = parseInt(value.get())
 
         if keyStr == "simulate_proof_failures":
-          node.marketplace.get().sales.simulateProofFailures(valueInt)
+          node.marketplace.get().sales.context.simulateProofFailures = valueInt
         elif keyStr == "dht_send_fail_probability":
           node.discovery.protocol.transport.sendFailProb = valueInt
         else:
