@@ -43,6 +43,7 @@ const
   Pos2Bn128MrklCodec* = multiCodec("poseidon2-alt_bn_128-merkle-2kb")
 
   ManifestCodec* = multiCodec("codex-manifest")
+  DirectoryCodec* = MultiCodec(0xCD04) # codex-directory (not yet registered in libp2p)
   DatasetRootCodec* = multiCodec("codex-root")
   BlockCodec* = multiCodec("codex-block")
   SlotRootCodec* = multiCodec("codex-slot-root")
@@ -52,8 +53,8 @@ const
   HashesCodecs* = [Sha256HashCodec, Pos2Bn128SpngCodec, Pos2Bn128MrklCodec]
 
   PrimitivesCodecs* = [
-    ManifestCodec, DatasetRootCodec, BlockCodec, SlotRootCodec, SlotProvingRootCodec,
-    SlotCellCodec,
+    ManifestCodec, DirectoryCodec, DatasetRootCodec, BlockCodec, SlotRootCodec,
+    SlotProvingRootCodec, SlotCellCodec,
   ]
 
 proc initEmptyCidTable(): ?!Table[(CidVersion, MultiCodec, MultiCodec), Cid] =
