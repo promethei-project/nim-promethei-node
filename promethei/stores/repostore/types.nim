@@ -7,13 +7,13 @@
 ## This file may not be copied, modified, or distributed except according to
 ## those terms.
 
-import std/options
 import std/sets
 import std/tables
 
 import pkg/chronos
 import pkg/kvstore
-import pkg/libp2p/[cid, multicodec]
+import pkg/libp2p/cid
+import pkg/libp2p/utils/semaphore
 import pkg/questionable
 import pkg/stew/bitseqs
 
@@ -33,9 +33,6 @@ const
 type
   QuotaNotEnoughError* = object of PrometheiError
   OverlayDeletingError* = object of PrometheiError
-  TreeNodeConflictError* = object of PrometheiError
-  TreeNodeNotFoundError* = object of PrometheiError
-  TreeNodeValidationError* = object of PrometheiError
 
   RepoStore* = ref object of BlockStore
     postFixLen*: int
@@ -49,7 +46,6 @@ type
     started*: bool
     deletingLock*: KeyedBarrier[Cid]
     overlayCache*: Table[Key, OverlayMetadata]
-    treeShapeCache*: Table[Cid, Option[(Natural, MultiCodec)]]
 
   QuotaUsage* {.serialize.} = object
     used*: NBytes
@@ -62,15 +58,12 @@ type
   LeafMetadata* {.serialize.} = object
     deleted*: bool
     blkCid*: Cid
-    proof*: ?PrometheiProof
+    proof*: PrometheiProof
     case isCell*: bool
     of true:
       cellCid*: Cid
     else:
       discard
-
-  TreeNodeMetadata* {.serialize.} = object
-    cid*: Cid
 
   OverlayStatus* {.serialize.} = enum
     Pending ## Initial state, not yet active
@@ -80,7 +73,6 @@ type
     Repairing ## Repair in progress
     Completed ## All blocks received/stored
     Deleting ## Deletion in progress
-    Finalizing ## Promotion in progress; new writes are rejected
 
   CleanupMode* {.serialize.} = enum
     ## Mode for cleaning up after storage request
