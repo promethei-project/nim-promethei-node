@@ -12,38 +12,24 @@
 import std/sequtils
 import std/sets
 
-import pkg/iter
 import pkg/chronos
 import pkg/libp2p
-import pkg/metrics
 import pkg/questionable/results
 
 import ../blocktype
 import ../blockexchange
-import ../errors
+import ../clock
 import ../logutils
 import ../manifest
 import ../merkletree
 import ../utils/asyncheapqueue
+import ../utils/safeasynciter
 import ./blockstore
 
 export blockstore, blockexchange, asyncheapqueue
 
 logScope:
   topics = "promethei networkstore"
-
-declareCounter(
-  promethei_networkstore_blocks_requested, "Total blocks requested from NetworkStore"
-)
-declareCounter(
-  promethei_networkstore_blocks_local, "Total blocks served from local store"
-)
-declareCounter(
-  promethei_networkstore_blocks_network, "Total blocks requested from network"
-)
-declareCounter(
-  promethei_networkstore_blocks_missed, "Total blocks not found locally or via network"
-)
 
 type NetworkStore* = ref object of BlockStore
   engine*: BlockExcEngine # blockexc decision engine
@@ -60,31 +46,37 @@ method getBlocks*(
   ##
 
   let
-    uniqueCids = cids.deduplicate()
+    uniqueCids = cids.toHashSet.toSeq
     localBlocks = ?await self.localStore.getBlocks(uniqueCids)
-  promethei_networkstore_blocks_requested.inc(uniqueCids.len.int64)
-  promethei_networkstore_blocks_local.inc(localBlocks.len.int64)
 
   if localBlocks.len == uniqueCids.len:
     return success(localBlocks)
 
-  var localCids: HashSet[Cid]
-  for blk in localBlocks:
-    localCids.incl(blk.cid)
+  # Find CIDs not returned locally
+  let localCids = localBlocks.mapIt(it.cid).toHashSet
+  var
+    toRequestCids = (uniqueCids.toHashSet - localCids).toSeq
+    requests: seq[Future[?!Block]]
 
-  var addresses: seq[BlockAddress]
-  for cid in uniqueCids:
-    if cid notin localCids:
-      addresses.add(BlockAddress.init(cid))
+  for cid in toRequestCids:
+    requests.add(self.engine.requestBlock(BlockAddress.init(cid)))
 
-  promethei_networkstore_blocks_network.inc(addresses.len.int64)
-  let
-    deliveries = ?self.engine.requestDeliveries(addresses)
-    (succeeded, failed) = await allFinishedFailed[BlockDelivery](deliveries)
+  var allBlocks = localBlocks
+  while requests.len > 0:
+    without completedFut =? catchAsync(await one(requests)), err:
+      error "Unable to get block from exchange engine", err = err.msg
+      break
 
-  promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  let networkBlocks = succeeded.mapIt(it.value.blk)
-  success(localBlocks & networkBlocks)
+    let idx = requests.find(completedFut)
+    requests.del(idx)
+
+    without blk =? catchAsync(await completedFut).flatten, err:
+      error "Unable to get block from exchange engine", err = err.msg
+      continue
+
+    allBlocks.add(blk)
+
+  success(allBlocks)
 
 method getBlock*(
     self: NetworkStore, cid: Cid
@@ -97,9 +89,11 @@ method getBlock*(
       error "Error getting block from local store", cid, err = err.msg
       return failure err
 
-    let delivery =
-      ?catchAsync(await (?self.engine.requestDelivery(BlockAddress.init(cid))))
-    return success delivery.blk
+    without newBlock =? (await self.engine.requestBlock(BlockAddress.init(cid))), err:
+      error "Unable to get block from exchange engine", cid, err = err.msg
+      return failure err
+
+    return success newBlock
 
   return success blk
 
@@ -114,11 +108,12 @@ method getBlock*(
       error "Error getting block from local store", treeCid, index, err = err.msg
       return failure err
 
-    let delivery =
-      ?catchAsync(
-        await (?self.engine.requestDelivery(BlockAddress.init(treeCid, index)))
-      )
-    return success delivery.blk
+    without newBlock =?
+      (await self.engine.requestBlock(BlockAddress.init(treeCid, index))), err:
+      error "Unable to get block from exchange engine", treeCid, index, err = err.msg
+      return failure err
+
+    return success newBlock
 
   return success blk
 
@@ -133,47 +128,45 @@ method getBlocks*(
   ##
 
   let
-    uniqueIndices = indices.deduplicate()
-    localBlocks = ?await self.localStore.getBlocks(treeCid, uniqueIndices)
+    indices = indices.toHashSet.toSeq
+    localBlocks = ?await self.localStore.getBlocks(treeCid, indices)
 
-  promethei_networkstore_blocks_requested.inc(uniqueIndices.len.int64)
-  promethei_networkstore_blocks_local.inc(localBlocks.len.int64)
   trace "Got local blocks", count = localBlocks.len
 
-  if localBlocks.len == uniqueIndices.len:
+  # If all indices returned, we're done
+  if localBlocks.len == indices.len:
     return success(localBlocks)
 
-  var localIndices: HashSet[Natural]
-  for item in localBlocks:
-    localIndices.incl(item[0])
+  # check get the diff of the still to retrieve indices from the network
+  var
+    toRequestIdxs = (indices.toHashSet - localBlocks.mapIt(it[0]).toHashSet).toSeq
+    requests: seq[Future[?!Block]]
 
-  var addresses: seq[BlockAddress]
-  for index in uniqueIndices:
-    if index notin localIndices:
-      addresses.add(BlockAddress.init(treeCid, index))
+  for idx in toRequestIdxs:
+    requests.add(self.engine.requestBlock(BlockAddress.init(treeCid, idx)))
 
-  promethei_networkstore_blocks_network.inc(addresses.len.int64)
-  let
-    treeDeliveries = ?self.engine.requestDeliveries(addresses)
-    (succeeded, failed) = await allFinishedFailed[BlockDelivery](treeDeliveries)
+  var allBlocks = localBlocks
+  while requests.len > 0:
+    without completedFut =? catchAsync(await one(requests)), err:
+      error "Unable to get block from exchange engine", treeCid, err = err.msg
+      break
 
-  promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  let treeNetworkBlocks = succeeded.mapIt((it.value.address.index, it.value.blk))
-  success(localBlocks & treeNetworkBlocks)
+    let
+      idx = requests.find(completedFut)
+      originalIdx = toRequestIdxs[idx]
+    requests.del(idx)
+    toRequestIdxs.del(idx)
 
-method completeBlocks*(
-    self: NetworkStore, treeCid: Cid, blocks: seq[(Natural, Block)]
-): Future[void] {.async: (raises: [CancelledError]).} =
-  var deliveries: seq[BlockDelivery]
-  for (index, blk) in blocks:
-    deliveries.add(BlockDelivery(address: BlockAddress.init(treeCid, index), blk: blk))
+    without blk =? catchAsync(await completedFut).flatten, err:
+      error "Unable to get block from exchange engine", treeCid, err = err.msg
+      continue
 
-  await self.engine.completeBlocks(deliveries)
+    allBlocks.add((originalIdx, blk))
 
-method completeBlock*(
-    self: NetworkStore, treeCid: Cid, index: Natural, blk: Block
-): Future[void] {.async: (raises: [CancelledError]).} =
-  await self.completeBlocks(treeCid, @[(index, blk)])
+  success allBlocks
+
+method completeBlock*(self: NetworkStore, treeCid: Cid, index: Natural, blk: Block) =
+  self.engine.completeBlock(BlockAddress.init(treeCid, index), blk)
 
 method putBlock*(
     self: NetworkStore, blk: Block, ttl = Duration.none
@@ -188,46 +181,23 @@ method putBlock*(
   return success()
 
 method putBlocks*(
-    self: NetworkStore, treeCid: Cid, items: seq[(Block, Natural, ?PrometheiProof)]
+    self: NetworkStore, treeCid: Cid, items: seq[(Block, Natural, PrometheiProof)]
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ## Store leafs and blocks locally and notify the network
   ##
 
   ?await self.localStore.putBlocks(treeCid, items)
-
-  var deliveries: seq[BlockDelivery]
-  for (blk, index, proof) in items:
-    deliveries.add(
-      BlockDelivery(address: BlockAddress.init(treeCid, index), blk: blk, proof: proof)
-    )
-
-  await self.engine.completeBlocks(deliveries)
-
+  await self.engine.resolveBlocks(items.mapIt(it[0]))
   return success()
 
 method putCidsAndProofs*(
     self: NetworkStore, treeCid: Cid, items: seq[(Natural, Cid, PrometheiProof)]
-): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ?await self.localStore.putCidsAndProofs(treeCid, items)
-
-  let storedItems =
-    ?await self.localStore.getBlocksAndProofs(treeCid, items.mapIt(it[0]))
-  var deliveries: seq[BlockDelivery]
-  for item in storedItems:
-    deliveries.add(
-      BlockDelivery(
-        address: BlockAddress.init(treeCid, item[0]), blk: item[1], proof: item[2]
-      )
-    )
-
-  if deliveries.len > 0:
-    await self.engine.completeBlocks(deliveries)
-
-  success()
+): Future[?!void] {.async: (raw: true, raises: [CancelledError]).} =
+  self.localStore.putCidsAndProofs(treeCid, items)
 
 method listBlocks*(
     self: NetworkStore, blockType = BlockType.Manifest
-): Future[?!AsyncIter[Cid]] {.async: (raw: true, raises: [CancelledError]).} =
+): Future[?!SafeAsyncIter[Cid]] {.async: (raw: true, raises: [CancelledError]).} =
   self.localStore.listBlocks(blockType)
 
 method delBlock*(
@@ -259,12 +229,15 @@ method hasBlocks*(
   self.localStore.hasBlocks(tree, indices)
 
 method storeManifest*(
-    self: NetworkStore, manifest: Manifest
+    self: NetworkStore,
+    manifest: Manifest,
+    slotIdx = Natural.none,
+    expiry = SecondsSince1970(0),
 ): Future[?!Block] {.async: (raw: true, raises: [CancelledError]).} =
   ## Store a manifest to the blockstore
   ##
 
-  self.localStore.storeManifest(manifest)
+  self.localStore.storeManifest(manifest, slotIdx, expiry)
 
 method fetchManifest*(
     self: NetworkStore, cid: Cid
@@ -274,9 +247,11 @@ method fetchManifest*(
 
   without manifest =? (await self.localStore.fetchManifest(cid)), err:
     if err of BlockNotFoundError:
-      let delivery =
-        ?catchAsync(await (?self.engine.requestDelivery(BlockAddress.init(cid))))
-      return Manifest.decode(delivery.blk)
+      without manifestBlk =? (await self.engine.requestBlock(cid)), err:
+        error "Unable to fetch manifest block!", err = err.msg
+        return failure(err)
+
+      return Manifest.decode(manifestBlk)
 
   return success manifest
 
@@ -306,61 +281,72 @@ method delBlocks*(
 
 method getBlocksAndProofs*(
     self: NetworkStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Natural, Block, ?PrometheiProof)]] {.
-    async: (raises: [CancelledError])
-.} =
+): Future[?!seq[(Natural, Block, PrometheiProof)]] {.async: (raises: [CancelledError]).} =
   ## Get multiple blocks and proofs.
   ##
   ## Fetches all locally available blocks in one batch call.
-  ## For missing blocks, requests proof-bearing deliveries from BlockExchange
-  ## and uses the validated delivery proof directly.
+  ## For any missing blocks, falls back to individual network requests
+  ## (concurrent, one per missing index). After the engine persists a
+  ## network-fetched block, we retrieve the proof from the local store.
+  ##
+  ## TODO: The engine should return both block and proof directly via a
+  ## future signaling mechanism, with the caller handling persistence.
+  ## Currently the engine persists internally, so we must re-query the
+  ## store for the proof after each network fetch.
   ##
 
   let
-    uniqueIndices = indices.deduplicate()
-    localBlocks = ?await self.localStore.getBlocksAndProofs(treeCid, uniqueIndices)
-  promethei_networkstore_blocks_requested.inc(uniqueIndices.len.int64)
-  promethei_networkstore_blocks_local.inc(localBlocks.len.int64)
+    indices = indices.toHashSet.toSeq
+    localBlocks = ?await self.localStore.getBlocksAndProofs(treeCid, indices)
 
   trace "Got local blocks and proofs", count = localBlocks.len
 
-  if localBlocks.len == uniqueIndices.len:
+  # If all indices returned, we're done
+  if localBlocks.len == indices.len:
     return success(localBlocks)
 
-  var localIndices: HashSet[Natural]
-  for item in localBlocks:
-    localIndices.incl(item[0])
+  # Check the diff of the still to retrieve indices from the network
+  var
+    toRequestIdxs = (indices.toHashSet - localBlocks.mapIt(it[0]).toHashSet).toSeq
+    requests: seq[Future[?!Block]]
 
-  var addresses: seq[BlockAddress]
-  for index in uniqueIndices:
-    if index notin localIndices:
-      addresses.add(BlockAddress.init(treeCid, index))
+  for idx in toRequestIdxs:
+    requests.add(self.engine.requestBlock(BlockAddress.init(treeCid, idx)))
 
-  promethei_networkstore_blocks_network.inc(addresses.len.int64)
-  var blocks: seq[(Natural, Block, ?PrometheiProof)]
-  let
-    deliveries = ?self.engine.requestDeliveries(addresses)
-    (succeeded, failed) = await allFinishedFailed[BlockDelivery](deliveries)
+  var allBlocks = localBlocks
+  while requests.len > 0:
+    without completedFut =? catchAsync(await one(requests)), err:
+      error "Unable to get block from exchange engine", treeCid, err = err.msg
+      break
 
-  promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  for delivery in succeeded.mapIt(it.value):
-    if not delivery.address.leaf:
-      warn "Skipping non-leaf delivery for leaf request", address = delivery.address
+    let
+      idx = requests.find(completedFut)
+      originalIdx = toRequestIdxs[idx]
+
+    requests.del(idx)
+    toRequestIdxs.del(idx)
+
+    without blk =? catchAsync(await completedFut).flatten, err:
+      error "Unable to get block from exchange engine", treeCid, err = err.msg
       continue
 
-    without proof =? delivery.proof:
-      warn "Skipping leaf delivery without proof", address = delivery.address
+    # TODO: The engine should return (Block, ?Proof), but we haven't yet refactored that,
+    # however, it does persist it on disk, so we can fetch from the local store.
+    # Once the engine is properly refactored for batch requests and returning the correct
+    # combination of (Block, Proof), we'll need to change this.
+    let blockProof = ?await self.localStore.getBlocksAndProofs(treeCid, @[originalIdx])
+    if blockProof.len == 0:
+      warn "Skipping block and proof, couldn't resolve",
+        treeCid, index = originalIdx, cid = blk.cid
       continue
 
-    blocks.add((delivery.address.index, delivery.blk, proof.some))
+    allBlocks.add(blockProof[0])
 
-  success(localBlocks & blocks)
+  success allBlocks
 
 method getCidsAndProofs*(
     self: NetworkStore, treeCid: Cid, indices: seq[Natural]
-): Future[?!seq[(Cid, ?PrometheiProof)]] {.
-    async: (raw: true, raises: [CancelledError])
-.} =
+): Future[?!seq[(Cid, PrometheiProof)]] {.async: (raw: true, raises: [CancelledError]).} =
   ## Get multiple CIDs and proofs
   ##
 
