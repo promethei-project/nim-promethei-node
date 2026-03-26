@@ -836,7 +836,7 @@ proc testLifecycle*(
 
       let
         protManifestBlk = (await repo.storeManifest(protManifest)).tryGet()
-        verManifestBlk = (await repo.storeManifest(verManifest)).tryGet()
+        verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
 
       # Drop tree overlay: protected manifest deleted, verifiable manifest untouched
       (await repo.dropOverlay(treeCid)).tryGet()
@@ -888,7 +888,7 @@ proc testLifecycle*(
 
       let
         protManifestBlk = (await repo.storeManifest(protManifest)).tryGet()
-        verManifestBlk = (await repo.storeManifest(verManifest)).tryGet()
+        verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
         verManifestBytes = verManifestBlk.data.len.NBytes
 
       # Drop tree overlay: data blocks + protected manifest gone
@@ -952,7 +952,7 @@ proc testLifecycle*(
       # Step 1: store both manifests
       let
         protManifestBlk = (await repo.storeManifest(protManifest)).tryGet()
-        verManifestBlk = (await repo.storeManifest(verManifest)).tryGet()
+        verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
         dataBytes = NBytes(100 + 101 + 102 + 103)
         protManifestBytes = protManifestBlk.data.len.NBytes
         verManifestBytes = verManifestBlk.data.len.NBytes
