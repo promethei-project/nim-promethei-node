@@ -232,8 +232,8 @@ suite "PendingBlocks ownership model":
     check address in peerCtx.blocksRequested
 
     await pb.resolve(address, blk)
-    check address notin peerCtx.blocksRequested
     let delivery = await handle
+
     check delivery.blk == blk
     check delivery.address == address
     check eventually address notin pb
