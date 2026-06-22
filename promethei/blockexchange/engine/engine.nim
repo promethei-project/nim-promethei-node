@@ -290,7 +290,7 @@ proc scoredPeer(
       picked = Rng.instance.sample(candidates)
       pickedScore = computeEffectiveScore(picked, now)
 
-    archivist_block_exchange_peer_selections_total.inc(labelValues = [$picked.id])
+    archivist_block_exchange_peer_selections.inc(labelValues = [$picked.id])
     archivist_block_exchange_peer_score.set(pickedScore, labelValues = [$picked.id])
     trace "Peer selected",
       address,
@@ -302,7 +302,7 @@ proc scoredPeer(
 
     return picked
 
-  archivist_block_exchange_peer_selections_total.inc(labelValues = [$best.id])
+  archivist_block_exchange_peer_selections.inc(labelValues = [$best.id])
   archivist_block_exchange_peer_score.set(bestScore, labelValues = [$best.id])
   trace "Peer selected",
     address,

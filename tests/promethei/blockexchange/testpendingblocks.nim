@@ -228,7 +228,7 @@ suite "PendingBlocks ownership model":
     await startWithoutDispatch(pb)
     let handle = pb.getWantHandle(address)
 
-    discard pb.markRequested(address, peerCtx, 60.seconds)
+    pb.markRequested(address, peerCtx, 60.seconds)
     check address in peerCtx.blocksRequested
 
     await pb.resolve(address, blk)
