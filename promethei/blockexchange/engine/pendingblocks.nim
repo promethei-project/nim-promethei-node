@@ -92,6 +92,7 @@ type
     owners: HashSet[BlockHandle]
     requestedPeer: BlockExcPeerCtx # nil = unassigned
     startTime: int64
+    stateEnteredAt: int64
     priority: int
     retries: int
     attempts: int
@@ -135,6 +136,16 @@ proc recordRetryOutcome*(self: PendingBlocksManager, addresses: seq[BlockAddress
     if req =? self.blocks .? [address]:
       let durationUs = (now - req.startTime) div 1000
       promethei_block_exchange_request_outcome_duration_seconds.observe(
+        durationUs.float64 / 1_000_000, labelValues = ["retried"]
+      )
+
+proc recordRetryOutcome*(self: PendingBlocksManager, addresses: seq[BlockAddress]) =
+  ## Record outcome duration for retried blocks
+  let now = getMonoTime().ticks
+  for address in addresses:
+    if req =? self.blocks .? [address]:
+      let durationUs = (now - req.startTime) div 1000
+      archivist_block_exchange_request_outcome_duration_seconds.observe(
         durationUs.float64 / 1_000_000, labelValues = ["retried"]
       )
 
@@ -271,6 +282,11 @@ proc releaseWantHandle(
   if req.owners.len == 0 and not req.handle.finished:
     warn "Abandoning block", address
     archivist_block_exchange_requests_abandoned.inc()
+    let now = getMonoTime().ticks
+    let durationUs = (now - req.startTime) div 1000
+    archivist_block_exchange_request_outcome_duration_seconds.observe(
+      durationUs.float64 / 1_000_000, labelValues = ["abandoned"]
+    )
     archivist_block_exchange_handles_failed.inc()
 
     req.handle.fail(
@@ -334,6 +350,7 @@ proc getWantHandle*(
       handle: handle,
       retries: self.retries,
       startTime: getMonoTime().ticks,
+      stateEnteredAt: getMonoTime().ticks,
       priority: priority,
       addedAt: now,
       dispatched: newAsyncEvent(),
@@ -432,6 +449,11 @@ proc failWantHandle*(
       let err = (ref errType)(address: address, msg: msg)
       blockReq.handle.fail(err)
       archivist_block_exchange_handles_failed.inc()
+      let now = getMonoTime().ticks
+      let durationUs = (now - blockReq.startTime) div 1000
+      archivist_block_exchange_request_outcome_duration_seconds.observe(
+        durationUs.float64 / 1_000_000, labelValues = ["failed"]
+      )
       self.failOwners(address, err)
       self.recordLifecycle(HandleFailed)
 
