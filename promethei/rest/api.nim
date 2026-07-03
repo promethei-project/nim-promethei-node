@@ -66,7 +66,7 @@ proc formatManifestBlocks(node: PrometheiNodeRef): Future[JsonNode] {.async.} =
   return %RestContentList.init(content)
 
 proc formatDatasetSlots(
-  manifest: Manifest, repostore: RepoStore
+    manifest: Manifest, repostore: RepoStore
 ): Future[?!seq[RestDatasetStatusSlot]] {.async.} =
   var slots = newSeq[RestDatasetStatusSlot]()
   if not manifest.protected:
@@ -77,11 +77,9 @@ proc formatDatasetSlots(
     without overlay =? (await repostore.getOverlay(cid)), err:
       error "Failed to fetch overlay for slotRoot", err = err.msg, slotCid = $cid
       return failure(err)
-    slots.add(RestDatasetStatusSlot(
-      cid: cid,
-      status: overlay.status,
-      expiry: overlay.expiry
-    ))
+    slots.add(
+      RestDatasetStatusSlot(cid: cid, status: overlay.status, expiry: overlay.expiry)
+    )
   return success(slots)
 
 proc formatDatasetStatus(
