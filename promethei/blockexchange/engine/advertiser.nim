@@ -26,9 +26,8 @@ logScope:
 const
   DefaultConcurrentAdvertRequests = 10
   DefaultAdvertiseLoopSleep = 30.minutes
-  DefaultMinAdvertisePeers = 16
+  DefaultMinAdvertisePeers* = 16
   DefaultAdvertiseRetrySleep = 30.seconds
-  DefaultAdvertiseRetryWindow = 10.minutes
 
 type Advertiser* = ref object of RootObj
   localStore*: BlockStore # Local block store for this instance
@@ -46,8 +45,6 @@ type Advertiser* = ref object of RootObj
   pendingAdvRetries: Table[Cid, Future[void]] # Delayed sparse retry tasks
   minAdvertisePeers: int # Desired routing-table size before advertising
   advertiseRetrySleep: Duration # Delay before retrying sparse startup advertise
-  advertiseRetryWindow: Duration # Startup window for sparse advertise retries
-  startedAt: Moment # Time advertiser started
 
 proc addCidToQueue(b: Advertiser, cid: Cid) {.async: (raises: [CancelledError]).} =
   if cid notin b.advertiseQueue:
@@ -104,18 +101,14 @@ proc advertiseLocalStoreLoop(b: Advertiser) {.async: (raises: []).} =
 
   info "Exiting advertise task loop"
 
-proc hasElapsed(since: Moment, dur: Duration): bool =
-  (Moment.now() - since) >= dur
-
 proc shouldRetryAdvertise(b: Advertiser): bool =
-  b.minAdvertisePeers > 0 and b.discovery.nodesDiscovered() < b.minAdvertisePeers and
-    not hasElapsed(b.startedAt, b.advertiseRetryWindow)
+  b.minAdvertisePeers > 0 and b.discovery.nodesDiscovered() < b.minAdvertisePeers
 
 proc delayedAdvertiseRetry(b: Advertiser, cid: Cid) {.async: (raises: []).} =
   try:
     await sleepAsync(b.advertiseRetrySleep)
 
-    if b.advertiserRunning and not hasElapsed(b.startedAt, b.advertiseRetryWindow):
+    if b.advertiserRunning and b.shouldRetryAdvertise():
       trace "Requeueing advertisement retry",
         cid, nodes = b.discovery.nodesDiscovered(), target = b.minAdvertisePeers
       await b.addCidToQueue(cid)
@@ -183,7 +176,6 @@ proc start*(b: Advertiser) {.async: (raises: []).} =
   doAssert(b.localStore.onBlockStored.isNone())
   b.localStore.onBlockStored = onBlock.some
 
-  b.startedAt = Moment.now()
   for i in 0 ..< b.concurrentAdvReqs:
     let fut = b.processQueueLoop()
     b.trackedFutures.track(fut)
@@ -216,7 +208,6 @@ proc new*(
     advertiseLocalStoreLoopSleep = DefaultAdvertiseLoopSleep,
     minAdvertisePeers = DefaultMinAdvertisePeers,
     advertiseRetrySleep = DefaultAdvertiseRetrySleep,
-    advertiseRetryWindow = DefaultAdvertiseRetryWindow,
 ): Advertiser =
   ## Create a advertiser instance
   ##
@@ -231,5 +222,4 @@ proc new*(
     advertiseLocalStoreLoopSleep: advertiseLocalStoreLoopSleep,
     minAdvertisePeers: minAdvertisePeers,
     advertiseRetrySleep: advertiseRetrySleep,
-    advertiseRetryWindow: advertiseRetryWindow,
   )
