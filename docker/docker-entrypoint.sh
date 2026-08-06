@@ -153,13 +153,22 @@ if [[ "${PROMETHEI_PROVER}" == "true" && -z "${SKIP_DOWNLOAD_CIRCUIT}" ]]; then
     export PROMETHEI_CIRCUIT_DIR="${PROMETHEI_DATA_DIR}/circuits"
   fi
 
-  # Download circuit
+  # Download circuit - retry until the RPC node is reachable. The dist-test
+  # harness treats a single failure as a pod crash.
   mkdir -p "${PROMETHEI_CIRCUIT_DIR}"
   chmod 700 "${PROMETHEI_CIRCUIT_DIR}"
   download="cirdl ${PROMETHEI_CIRCUIT_DIR} ${PROMETHEI_ETH_PROVIDER} ${PROMETHEI_MARKETPLACE_ADDRESS}"
   echo "${download}"
-  eval "${download}"
-  [[ $? -ne 0 ]] && { echo "Failed to download circuit files"; exit 1; }
+  n=0
+  until eval "${download}"; do
+    n=$((n + 1))
+    if [ $n -ge 10 ]; then
+      echo "Failed to download circuit files"
+      exit 1
+    fi
+    echo "Circuit download attempt $n failed, retrying in 10s..."
+    sleep 10
+  done
 fi
 
 # Show
