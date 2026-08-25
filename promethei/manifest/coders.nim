@@ -56,8 +56,6 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
   #     optional filename: ?string = 8;    # original filename
   #     optional mimetype: ?string = 9;    # original mimetype
   #     optional cidVersion: CidVersion = 10; # Cid version
-  #     optional innerK: uint32 = 11;      # inner cell code data shards (K)
-  #     optional innerN: uint32 = 12;      # inner cell code total shards (N)
   #   }
   # ```
   #
@@ -70,8 +68,6 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
   header.write(5, manifest.hcodec.uint32)
   header.write(6, manifest.version.uint32)
   header.write(10, manifest.cidVersion.uint32)
-  header.write(11, manifest.innerK.uint32)
-  header.write(12, manifest.innerN.uint32)
 
   if manifest.protected:
     var erasureInfo = initProtoBuffer()
@@ -122,8 +118,6 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     hcodec: uint32
     version: uint32
     cidVersion: uint32
-    innerK: uint32
-    innerN: uint32
     blockSize: uint32
     originalDatasetSize: uint64
     ecK, ecM: uint32
@@ -165,12 +159,6 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
   if pbHeader.getField(10, cidVersion).isErr:
     return failure("Unable to decode `cidVersion` from manifest!")
-
-  if pbHeader.getField(11, innerK).isErr:
-    return failure("Unable to decode `innerK` from manifest!")
-
-  if pbHeader.getField(12, innerN).isErr:
-    return failure("Unable to decode `innerN` from manifest!")
 
   if pbHeader.getField(7, pbErasureInfo).isErr:
     return failure("Unable to decode `erasureInfo` from manifest!")
@@ -235,8 +223,6 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         blockSize = blockSize.NBytes,
         version = version,
         cidVersion = cidVersion.CidVersion,
-        innerK = innerK,
-        innerN = innerN,
         hcodec = hcodec.MultiCodec,
         codec = codec.MultiCodec,
         ecK = ecK.int,
@@ -254,8 +240,6 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         blockSize = blockSize.NBytes,
         version = version,
         cidVersion = cidVersion.CidVersion,
-        innerK = innerK,
-        innerN = innerN,
         hcodec = hcodec.MultiCodec,
         codec = codec.MultiCodec,
         filename = filenameOption,

@@ -140,10 +140,11 @@ func numSlotCells*[SomeTree, SomeHash](
   ## parity leaves)
   ##
 
-  self.numBlockCells *
-    (self.numSlotBlocks +
-     self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) *
-       self.numSlotBlocks)
+  self.numBlockCells * (
+    self.numSlotBlocks + self.manifest.parityBlocksPerSlot(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
+  )
 
 func slotIndicesIter*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], slot: Natural
@@ -223,7 +224,9 @@ proc buildVerifiableLeafCids*[SomeTree, SomeHash](
 
   let
     protectedCount = self.manifest.protectedBlocksCount
-    parityPerSlot = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+    parityPerSlot = self.manifest.parityBlocksPerSlot(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
   var leafCids = newSeq[Cid](protectedCount + self.manifest.numSlots * parityPerSlot)
   for idx in 0 ..< protectedCount:
     leafCids[idx] = ?await self.getStoredCid(self.manifest.treeCid, idx.Natural)
@@ -294,7 +297,9 @@ proc getSlotLeafBlock*[SomeTree, SomeHash](
   else:
     let
       protectedCount = self.manifest.protectedBlocksCount
-      parityPerSlot = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+      parityPerSlot = self.manifest.parityBlocksPerSlot(
+        self.numBlockCells.int, self.numSlotBlocks.int
+      )
       blk = ?await self.networkStore.getBlock(
         parityRoot,
         protectedCount + slotIndex * parityPerSlot + (slotPos - self.numSlotBlocks),
@@ -323,7 +328,9 @@ proc buildSlotTree*[SomeTree, SomeHash](
 
   let
     dataLeaves = self.numSlotBlocks
-    parityLeaves = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+    parityLeaves = self.manifest.parityBlocksPerSlot(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
 
   proc digestAt(pos: int): Future[SomeHash] {.async.} =
     ## Root of the block digest tree at slot leaf position `pos`; raises on
@@ -368,7 +375,9 @@ proc sealSlot*[SomeTree, SomeHash](
   let
     indices = toSeq(?catch(self.strategy.getIndices(slotIndex)))
     dataLeaves = indices.len
-    parityLeaves = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+    parityLeaves = self.manifest.parityBlocksPerSlot(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
     protectedCount = self.manifest.protectedBlocksCount
 
   trace "Storing slot tree", treeCid, slotIndex, leaves = tree.leavesCount
@@ -410,6 +419,22 @@ proc sealSlot*[SomeTree, SomeHash](
 
   tree.root()
 
+proc packParityCells(
+    cells: seq[byte], cellSize: int, cellsPerBlock: int
+): seq[seq[byte]] =
+  ## Chunk concatenated parity cells into compound blocks of `cellsPerBlock`
+  ## cells, zero-padding the final block when it is not full.
+  let
+    blockBytes = cellsPerBlock * cellSize
+    count = divUp(cells.len, blockBytes)
+  for i in 0 ..< count:
+    var blk = newSeq[byte](blockBytes) # zero-initialized tail padding
+    let
+      start = i * blockBytes
+      len = min(blockBytes, cells.len - start)
+    blk[0 ..< len] = cells[start ..< start + len]
+    result.add(blk)
+
 proc encodeSlot*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash],
     slotIndex: Natural,
@@ -420,18 +445,19 @@ proc encodeSlot*[SomeTree, SomeHash](
   ## `targetRoot` (the CURRENT overlay). Returns the slot's parity CIDs in
   ## position order [pass1 ++ pass2].
   ##
-  ## The inner cell code is (K, N) from the manifest; `rate` = (N-K)/K
-  ## parity shards per data shard.
+  ## The inner cell code runs at the layout version's rate K:N (a protocol
+  ## constant - never stored, never hardcoded here). All geometry derives
+  ## from the manifest accessors:
   ##
-  ## Pass 1 (row-wise): each block's C cells encode to C*rate parity cells
-  ## = `rate` compound parity blocks per data block -> T*rate blocks.
+  ## Pass 1 (row-wise): each block's C cells encode to n_row = C*N/K shards;
+  ## the n_row - C parity cells per row are concatenated across rows and
+  ## packed into C-cell compound blocks (tail zero-padded).
   ##
-  ## Pass 2 (column-wise, a TRUE product code): each cell-row of ALL
-  ## C*(1+rate) columns (data cells AND pass-1 parity cells) is encoded;
-  ## the parity-of-parity corner is interleaved across the pass-2 region:
-  ## pass2Block[(1+rate)*s + r][c] = parity shard s of cell-row r*C + c
-  ## (r=0 blocks carry data-column parity, r>=1 blocks the corner).
-  ## -> (1+rate)*T*rate blocks.
+  ## Pass 2 (column-wise, a TRUE product code): each of the n_row cell-rows
+  ## (data cells AND pass-1 parity cells) is encoded over the T data shards;
+  ## the n_col - T parity cells per column are concatenated column-major and
+  ## packed the same way. The parity-of-parity corner therefore lands in the
+  ## last columns' parity, interleaved into the pass-2 region.
   ##
 
   logScope:
@@ -440,13 +466,20 @@ proc encodeSlot*[SomeTree, SomeHash](
 
   trace "Encoding slot parity"
   let
-    numSlotBlocks = self.numSlotBlocks
-    numBlockCells = self.numBlockCells
     cellSize = self.cellSize.int
+    C = self.numBlockCells.int # cells per block
+    T = self.numSlotBlocks.int # data-region leaves incl. pow2 pads
+    nRow = self.manifest.rowShards(self.numBlockCells.int) # shards per row after pass 1
+    nCol = self.manifest.colShards(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    ) # shards per column after pass 2
     protectedCount = self.manifest.protectedBlocksCount
-    rate = self.manifest.innerParityFactor
-    firstPass = rate * self.numSlotBlocks
-    parityPerSlot = rate * (2 + rate) * self.numSlotBlocks
+    parityPerSlot = self.manifest.parityBlocksPerSlot(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
+    firstPassBlocks = self.manifest.firstPassParityBlocks(
+      self.numBlockCells.int, self.numSlotBlocks.int
+    )
 
   # 1. Data materialization: real blocks + zero-fill for pads
   let indices = ?self.slotIndices(slotIndex)
@@ -459,39 +492,39 @@ proc encodeSlot*[SomeTree, SomeHash](
       else:
         self.emptyBlock
 
-  # 2. Pass 1 - row-wise: C cells -> C(1+rate) cells (rate compound parity
-  #    blocks per row)
-  var pass1Blocks: seq[seq[byte]]
-  for b in 0 ..< numSlotBlocks:
+  # 2. Pass 1 - row-wise: C data cells -> n_row shards; parity concatenated
+  var pass1Cells: seq[byte]
+  for b in 0 ..< T:
     var stripe: seq[seq[byte]]
-    for c in 0 ..< numBlockCells:
+    for c in 0 ..< C:
       stripe.add(blocks[b][c * cellSize ..< (c + 1) * cellSize])
-    let parity = ?await self.erasure.encodeStripes(stripe, numBlockCells * rate)
-    for i in 0 ..< rate:
-      pass1Blocks.add(concat(parity[i * numBlockCells ..< (i + 1) * numBlockCells]))
+    let parity = ?await self.erasure.encodeStripes(stripe, nRow - C)
+    for shard in parity:
+      pass1Cells.add(shard)
 
-  # 3. Pass 2 - column-wise over ALL C(1+rate) cell-rows (data rows AND
-  #    pass-1 parity rows); interleaved bottom-right corner
-  var pass2Blocks = newSeq[seq[byte]]((1 + rate) * rate * numSlotBlocks)
-  for j in 0 ..< (1 + rate) * numBlockCells:
-    let
-      r = j div numBlockCells
-      c = j mod numBlockCells
+  # 3. Pass 2 - column-wise over ALL nRow cell-rows (data columns AND pass-1
+  #    parity columns); parity concatenated column-major
+  var pass2Cells: seq[byte]
+  for j in 0 ..< nRow:
     var stripe: seq[seq[byte]]
-    for b in 0 ..< numSlotBlocks:
-      let
-        data =
-          if r == 0:
-            blocks[b]
-          else:
-            pass1Blocks[b * rate + (r - 1)]
-        start = c * cellSize
-      stripe.add(data[start ..< start + cellSize])
-    let parity = ?await self.erasure.encodeStripes(stripe, numSlotBlocks * rate)
-    for s in 0 ..< numSlotBlocks * rate:
-      pass2Blocks[(1 + rate) * s + r].add(parity[s])
+    for b in 0 ..< T:
+      let shard =
+        if j < C:
+          blocks[b][j * cellSize ..< (j + 1) * cellSize]
+        else:
+          let off = (b * (nRow - C) + (j - C)) * cellSize
+          pass1Cells[off ..< off + cellSize]
+      stripe.add(shard)
+    let parity = ?await self.erasure.encodeStripes(stripe, nCol - T)
+    for shard in parity:
+      pass2Cells.add(shard)
 
-  # 4. Store at position(slotIndex, pass, i) under targetRoot
+  # 4. Pack into compound blocks and store at
+  #    position(slotIndex, pass, i) under targetRoot
+  let
+    pass1Blocks = packParityCells(pass1Cells, cellSize, C)
+    pass2Blocks = packParityCells(pass2Cells, cellSize, C)
+
   var
     items: seq[(bt.Block, Natural, ?PrometheiProof)]
     parityCids: seq[Cid]
@@ -512,7 +545,7 @@ proc encodeSlot*[SomeTree, SomeHash](
     items.add(
       (
         blk,
-        (protectedCount + slotIndex * parityPerSlot + firstPass + i).Natural,
+        (protectedCount + slotIndex * parityPerSlot + firstPassBlocks + i).Natural,
         PrometheiProof.none,
       )
     )
@@ -638,7 +671,9 @@ proc buildManifest*[SomeTree, SomeHash](
   let verifiableSize = (
     self.manifest.blockSize.int * (
       self.manifest.protectedBlocksCount +
-      self.manifest.numSlots * 3 * self.manifest.innerParityFactor * self.numSlotBlocks
+      self.manifest.numSlots * self.manifest.parityBlocksPerSlot(
+        self.numBlockCells.int, self.numSlotBlocks.int
+      )
     )
   ).NBytes
 
