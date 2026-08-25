@@ -12,6 +12,7 @@ import pkg/promethei/blocktype as bt
 import pkg/promethei/chunker
 import pkg/promethei/indexingstrategy
 import pkg/promethei/slots
+import pkg/promethei/erasure
 import pkg/promethei/rng
 
 import ../helpers
@@ -103,8 +104,10 @@ proc createVerifiableManifest*(
       totalDatasetSize,
     )
 
-    builder =
-      Poseidon2Builder.new(store, store, protectedManifest, cellSize = cellSize).tryGet
+    erasure = Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, tp)
+    builder = Poseidon2Builder.new(
+      store, store, erasure, protectedManifest, cellSize = cellSize
+    ).tryGet
     verifiableManifest = (await builder.buildManifest(tp)).tryGet
 
   (manifest, protectedManifest, verifiableManifest)

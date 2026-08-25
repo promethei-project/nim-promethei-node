@@ -136,7 +136,7 @@ suite "StoreStream - Size Tests":
         treeCid = Cid.example,
         datasetSize = 120.NBytes, # size including parity bytes
         blockSize = 10.NBytes,
-        version = CIDv1,
+        version = ManifestVersionV1,
         hcodec = Sha256HashCodec,
         codec = BlockCodec,
         ecK = 2,

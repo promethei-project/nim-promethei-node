@@ -241,7 +241,7 @@ proc fetchBatched*(
   trace "Fetching blocks in batches of",
     size = batchSize, blocksCount = manifest.blocksCount
 
-  let iter = Iter[int].new(0 ..< manifest.blocksCount)
+  let iter = manifest.getBlocksIterator()
   self.fetchBatched(manifest.treeCid, iter, batchSize, onBatch, fetchLocal)
 
 proc fetchDatasetAsync*(
@@ -638,7 +638,7 @@ proc store*(
     treeCid = treeCid,
     blockSize = blockSize,
     datasetSize = NBytes(chunker.offset),
-    version = CIDv1,
+    version = ManifestVersionV1,
     hcodec = hcodec,
     codec = dataCodec,
     filename = filename,
@@ -712,8 +712,15 @@ proc ensureVerifiableManifest(
     return success protected
 
   # Create verifiable manifest from protected manifest
-  let builder =
-    ?Poseidon2Builder.new(self.networkStore.localStore, self.repoStore, protected)
+  let
+    erasure = Erasure.new(
+      self.networkStore.localStore, self.repoStore, leoEncoderProvider,
+      leoDecoderProvider, self.taskpool,
+    )
+    builder =
+      ?Poseidon2Builder.new(
+        self.networkStore.localStore, self.repoStore, erasure, protected
+      )
   return await builder.buildManifest(self.taskpool)
 
 proc setupRequest(
@@ -884,7 +891,14 @@ proc storeSlot*(
 
   without builder =?
     Poseidon2Builder.new(
-      self.networkStore, self.repoStore, manifest, manifest.verifiableStrategy
+      self.networkStore,
+      self.repoStore,
+      Erasure.new(
+        self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
+        self.taskpool,
+      ),
+      manifest,
+      manifest.verifiableStrategy,
     ), err:
     error "Unable to create slots builder", err = err.msg
     return failure(err)
@@ -897,7 +911,7 @@ proc storeSlot*(
     error "Cannot cast slot index to int", slotIndex = slotIndex
     return failure(newException(PrometheiError, "Cannot cast slot index to int"))
 
-  without blksIter =? manifest.getSlotBlockIterator(slotIndex.int), err:
+  without blksIter =? manifest.getSlotIterator(slotIndex.int), err:
     error "Unable to get indices from strategy", err = err.msg
     return failure(err)
 
@@ -922,7 +936,11 @@ proc storeSlot*(
       error "Unable to fetch blocks", err = err.msg
       return failure(err)
 
-  without slotRoot =? (await builder.buildSlot(slotIndex.int, self.taskpool)), err:
+  without slotRoot =? (
+    await builder.sealSlot(
+      slotIndex.int, manifest.treeCid, manifest.treeCid, self.taskpool
+    )
+  ), err:
     error "Unable to build slot", err = err.msg
     return failure(err)
 
@@ -959,9 +977,14 @@ proc proveSlot*(
 
     let
       manifest = ?await self.repoStore.fetchManifest(cid)
+      erasure = Erasure.new(
+        self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
+        self.taskpool,
+      )
       builder =
         ?Poseidon2Builder.new(
-          self.networkStore, self.repoStore, manifest, manifest.verifiableStrategy
+          self.networkStore, self.repoStore, erasure, manifest,
+          manifest.verifiableStrategy,
         )
       sampler = ?Poseidon2Sampler.new(slotIdx, self.networkStore, builder)
 

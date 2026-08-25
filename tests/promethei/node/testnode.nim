@@ -289,7 +289,8 @@ suite "Test Node - Purchase request":
         networkStore, localStore, leoEncoderProvider, leoDecoderProvider, node.taskpool
       )
       protected = (await erasure.encode(referenceManifest, 3, 2)).tryGet()
-      builder = Poseidon2Builder.new(networkStore, localStore, protected).tryGet()
+      builder =
+        Poseidon2Builder.new(networkStore, localStore, erasure, protected).tryGet()
       verifiable = (await builder.buildManifest(node.taskpool)).tryGet()
 
     protectedManifestBlock =

@@ -337,6 +337,42 @@ proc leopardEncodeTask*(
   else:
     ctx[].result = ThreadSpawnRes[seq[seq[byte]]].ok(move parity[])
 
+proc encodeStripes*(
+    self: Erasure,
+    stripes: sink seq[seq[byte]], # k equal-length shards, one stripe
+    parityCount: Natural, # n - k parity shards to produce
+): Future[?!seq[seq[byte]]] {.async: (raises: [CancelledError]).} =
+  ## Encode one stripe of k equal-length shards into `parityCount` parity
+  ## shards. No storage, no CIDs, no source root. Callers zero-fill pad
+  ## shards before calling.
+  ##
+  if stripes.len == 0:
+    return failure "No shards to encode"
+
+  let shardLen = stripes[0].len
+  for shard in stripes:
+    if shard.len != shardLen:
+      return failure "Mismatched shard lengths in encodeStripes"
+
+  var
+    data = stripes
+    parity = newSeqWith(parityCount, newSeq[byte](shardLen))
+
+  # Encode on the taskpool: the structures are moved through the
+  # spawnJoin result channel, no GC refs cross the boundary.
+  try:
+    parity =
+      ?await spawnJoin(
+        proc(ctx: SharedPtr[TaskCtx[seq[seq[byte]]]]) {.gcsafe, raises: [].} =
+          self.taskPool.spawn leopardEncodeTask(
+            ctx, addr self, shardLen, addr data, addr parity
+          )
+      )
+  except SpawnContractError as e:
+    return failure(e)
+
+  success parity
+
 proc encodeData(
     self: Erasure, originalTreeCid: Cid, tmpTreeCid: Cid, params: EncodingParams
 ): Future[?!ref seq[Cid]] {.async: (raises: [CancelledError]).} =
@@ -406,6 +442,39 @@ proc encodeData(
   trace "Encoding complete", encodedBlocksCount = params.encodedBlocksCount
   success cids
 
+proc treeAndProofs*(
+    self: Erasure, cids: ref seq[Cid], targetCid: Cid
+): Future[?!Cid] {.async: (raises: [CancelledError]).} =
+  ## Build a tree over `cids`, store per-leaf proofs under `targetCid`,
+  ## and return the tree root.
+  ##
+  if cids[].len == 0:
+    return failure "Empty leaves"
+
+  proc liftCid(cid: Cid): Future[Cid] {.async.} =
+    cid
+
+  let cidsIter = mapAsync[Cid, Cid](Iter[Cid].new(cids[]), liftCid)
+  defer:
+    if err =? catchAsync(await cidsIter.dispose()).errorOption:
+      warn "Failed to dispose tree iterator", err = err.msg
+
+  let
+    tree =
+      ?await PrometheiTree.buildAsync(
+        cidsIter, self.taskPool, mcodec = (?cids[][0].mhash.mapFailure).mcodec
+      )
+    treeCid = ?tree.rootCid
+
+  var proofItems: seq[(Natural, Cid, PrometheiProof)]
+  for index, cid in cids[]:
+    proofItems.add((index.Natural, cid, ?tree.getProof(index)))
+
+  ?await self.networkStore.putCidsAndProofs(targetCid, proofItems)
+
+  trace "Tree and proofs stored", treeCid
+  success treeCid
+
 proc encode*(
     self: Erasure,
     manifest: Manifest,
@@ -421,7 +490,7 @@ proc encode*(
   ##
 
   let
-    emptyCid = ?emptyCid(manifest.version, manifest.hcodec, manifest.codec)
+    emptyCid = ?emptyCid(manifest.cidVersion, manifest.hcodec, manifest.codec)
     sourceManifest =
       if manifest.protected:
         Manifest.new(manifest)
@@ -429,36 +498,6 @@ proc encode*(
         manifest
     params =
       ?EncodingParams.init(sourceManifest, blocks.int, parity.int, strategy, emptyCid)
-
-  proc treeAndProofs(
-      cids: ref seq[Cid], targetCid: Cid
-  ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
-    if cids[].len == 0:
-      return failure "Empty leaves"
-
-    proc liftCid(cid: Cid): Future[Cid] {.async.} =
-      cid
-
-    let cidsIter = mapAsync[Cid, Cid](Iter[Cid].new(cids[]), liftCid)
-    defer:
-      if err =? catchAsync(await cidsIter.dispose()).errorOption:
-        warn "Failed to dispose tree iterator", err = err.msg
-
-    let
-      tree =
-        ?await PrometheiTree.buildAsync(
-          cidsIter, self.taskPool, mcodec = (?cids[][0].mhash.mapFailure).mcodec
-        )
-      treeCid = ?tree.rootCid
-
-    var proofItems: seq[(Natural, Cid, PrometheiProof)]
-    for index, cid in cids[]:
-      proofItems.add((index.Natural, cid, ?tree.getProof(index)))
-
-    ?await self.networkStore.putCidsAndProofs(targetCid, proofItems)
-
-    trace "Tree and proofs stored", treeCid, blocks = blocks, parity = parity
-    success treeCid
 
   let treeCid =
     if manifest.protected:
@@ -470,7 +509,7 @@ proc encode*(
         .} =
           let cids =
             ?await self.encodeData(sourceManifest.treeCid, manifest.treeCid, params)
-          await treeAndProofs(cids, manifest.treeCid)
+          await self.treeAndProofs(cids, manifest.treeCid)
         ,
       )
     else:
@@ -480,7 +519,7 @@ proc encode*(
         ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
           let cids = ?await self.encodeData(sourceManifest.treeCid, tmpCid, params)
 
-          await treeAndProofs(cids, tmpCid)
+          await self.treeAndProofs(cids, tmpCid)
       )
 
   let protected = Manifest.new(
@@ -611,7 +650,7 @@ proc decode*(
   trace "Preparing to decode dataset"
 
   let
-    emptyCid = ?emptyCid(encoded.version, encoded.hcodec, encoded.codec)
+    emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
 
   var
@@ -675,7 +714,7 @@ proc repair*(
   trace "Preparing to repair dataset"
 
   let
-    emptyCid = ?emptyCid(encoded.version, encoded.hcodec, encoded.codec)
+    emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
 
   ?await self.repoStore.withOverlay(

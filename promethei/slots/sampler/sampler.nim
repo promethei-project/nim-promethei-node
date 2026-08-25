@@ -47,14 +47,11 @@ proc getSample*[SomeTree, SomeHash](
     cellsPerBlock = self.builder.numBlockCells
     blkCellIdx = cellIdx.toCellInBlk(cellsPerBlock) # block cell index
     blkSlotIdx = cellIdx.toBlkInSlot(cellsPerBlock) # slot tree index
-    origBlockIdx = (?self.builder.slotIndices(self.index))[blkSlotIdx]
-      # convert to original dataset block index
 
   logScope:
     cellIdx = cellIdx
     blkSlotIdx = blkSlotIdx
     blkCellIdx = blkCellIdx
-    origBlockIdx = origBlockIdx
 
   trace "Retrieving sample from block tree"
   let (_, proof) = (
@@ -69,7 +66,15 @@ proc getSample*[SomeTree, SomeHash](
     slotProof = slotProofVal.toVerifiableProof().valueOr:
       return failure("Failed to get verifiable proof")
 
-    (bytes, blkTree) = (await self.builder.buildBlockTree(origBlockIdx, blkSlotIdx)).valueOr:
+    # The slot leaf's block (data or parity - one flat position function)
+    (bytes, blkTree) = (
+      await self.builder.getSlotLeafBlock(
+        self.index,
+        self.builder.manifest.treeCid,
+        self.builder.manifest.treeCid,
+        blkSlotIdx.Natural,
+      )
+    ).valueOr:
       return failure("Failed to build block tree")
 
     cellData = self.getCell(bytes, blkCellIdx)

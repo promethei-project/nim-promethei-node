@@ -7,6 +7,7 @@ import pkg/promethei/merkletree
 import pkg/promethei/chunker
 import pkg/promethei/blocktype as bt
 import pkg/promethei/slots
+import pkg/promethei/erasure
 import pkg/promethei/stores
 import pkg/promethei/conf
 import pkg/poseidon2/io
@@ -59,7 +60,11 @@ suite "Test CircomCompat Prover":
       )
 
       builder = Poseidon2Builder.new(
-        store, store, verifiable, verifiable.verifiableStrategy
+        store,
+        store,
+        Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, dbTp),
+        verifiable,
+        verifiable.verifiableStrategy,
       ).tryGet
       sampler = Poseidon2Sampler.new(1, store, builder).tryGet
       (_, checked) =
@@ -85,7 +90,11 @@ suite "Test CircomCompat Prover":
       )
 
       builder = Poseidon2Builder.new(
-        store, store, verifiable, verifiable.verifiableStrategy
+        store,
+        store,
+        Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, dbTp),
+        verifiable,
+        verifiable.verifiableStrategy,
       ).tryGet
       sampler = Poseidon2Sampler.new(1, store, builder).tryGet
       (_, checked) =
@@ -140,7 +149,11 @@ suite "Test NimGroth16 Prover":
       )
 
       builder = Poseidon2Builder.new(
-        store, store, verifiable, verifiable.verifiableStrategy
+        store,
+        store,
+        Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, dbTp),
+        verifiable,
+        verifiable.verifiableStrategy,
       ).tryGet
       sampler = Poseidon2Sampler.new(1, store, builder).tryGet
       (_, checked) =
@@ -166,7 +179,11 @@ suite "Test NimGroth16 Prover":
       )
 
       builder = Poseidon2Builder.new(
-        store, store, verifiable, verifiable.verifiableStrategy
+        store,
+        store,
+        Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, dbTp),
+        verifiable,
+        verifiable.verifiableStrategy,
       ).tryGet
       sampler = Poseidon2Sampler.new(1, store, builder).tryGet
       (_, checked) =

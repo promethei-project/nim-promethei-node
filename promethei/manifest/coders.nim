@@ -32,6 +32,10 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
   #   Message VerificationInfo {
   #     bytes verifyRoot = 1;             # Decimal encoded field-element
   #     repeated bytes slotRoots = 2;     # Decimal encoded field-elements
+  #     optional uint32 cellSize = 3;     # Size of each slot cell
+  #     optional uint32 verifiableStrategy = 4; # Indexing strategy of the slot roots
+  #     optional bytes protectedTreeCid = 5;    # Root of the protected tree
+  #     optional uint64 protectedDatasetSize = 6; # Physical size of the protected dataset
   #   }
   #   Message ErasureInfo {
   #     optional uint32 ecK = 1;                            # number of encoded blocks
@@ -47,10 +51,13 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
   #     optional uint64 datasetSize = 3;  # size of the dataset
   #     optional codec: MultiCodec = 4;   # Dataset codec
   #     optional hcodec: MultiCodec = 5   # Multihash codec
-  #     optional version: CidVersion = 6; # Cid version
+  #     optional version: uint32 = 6;  # manifest version
   #     optional ErasureInfo erasure = 7; # erasure coding info
   #     optional filename: ?string = 8;    # original filename
   #     optional mimetype: ?string = 9;    # original mimetype
+  #     optional cidVersion: CidVersion = 10; # Cid version
+  #     optional innerK: uint32 = 11;      # inner cell code data shards (K)
+  #     optional innerN: uint32 = 12;      # inner cell code total shards (N)
   #   }
   # ```
   #
@@ -62,6 +69,9 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
   header.write(4, manifest.codec.uint32)
   header.write(5, manifest.hcodec.uint32)
   header.write(6, manifest.version.uint32)
+  header.write(10, manifest.cidVersion.uint32)
+  header.write(11, manifest.innerK.uint32)
+  header.write(12, manifest.innerN.uint32)
 
   if manifest.protected:
     var erasureInfo = initProtoBuffer()
@@ -78,6 +88,8 @@ proc encode*(manifest: Manifest): ?!seq[byte] =
         verificationInfo.write(2, slotRoot.data.buffer)
       verificationInfo.write(3, manifest.cellSize.uint32)
       verificationInfo.write(4, manifest.verifiableStrategy.uint32)
+      verificationInfo.write(5, manifest.protectedTreeCid.data.buffer)
+      verificationInfo.write(6, manifest.protectedDatasetSize.uint64)
       erasureInfo.write(6, verificationInfo)
 
     erasureInfo.finish()
@@ -109,6 +121,9 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     codec: uint32
     hcodec: uint32
     version: uint32
+    cidVersion: uint32
+    innerK: uint32
+    innerN: uint32
     blockSize: uint32
     originalDatasetSize: uint64
     ecK, ecM: uint32
@@ -117,6 +132,8 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     slotRoots: seq[seq[byte]]
     cellSize: uint32
     verifiableStrategy: uint32
+    protectedTreeCid: seq[byte]
+    protectedDatasetSize: uint64
     filename: string
     mimetype: string
 
@@ -142,6 +159,18 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
   if pbHeader.getField(6, version).isErr:
     return failure("Unable to decode `version` from manifest!")
+
+  if version != ManifestVersionV1:
+    return failure("Unsupported manifest version")
+
+  if pbHeader.getField(10, cidVersion).isErr:
+    return failure("Unable to decode `cidVersion` from manifest!")
+
+  if pbHeader.getField(11, innerK).isErr:
+    return failure("Unable to decode `innerK` from manifest!")
+
+  if pbHeader.getField(12, innerN).isErr:
+    return failure("Unable to decode `innerN` from manifest!")
 
   if pbHeader.getField(7, pbErasureInfo).isErr:
     return failure("Unable to decode `erasureInfo` from manifest!")
@@ -187,6 +216,12 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
       if pbVerificationInfo.getField(4, verifiableStrategy).isErr:
         return failure("Unable to decode `verifiableStrategy` from manifest!")
 
+      if pbVerificationInfo.getField(5, protectedTreeCid).isErr:
+        return failure("Unable to decode `protectedTreeCid` from manifest!")
+
+      if pbVerificationInfo.getField(6, protectedDatasetSize).isErr:
+        return failure("Unable to decode `protectedDatasetSize` from manifest!")
+
   let treeCid = ?Cid.init(treeCidBuf).mapFailure
 
   var filenameOption = if filename.len == 0: string.none else: filename.some
@@ -198,7 +233,10 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         treeCid = treeCid,
         datasetSize = datasetSize.NBytes,
         blockSize = blockSize.NBytes,
-        version = CidVersion(version),
+        version = version,
+        cidVersion = cidVersion.CidVersion,
+        innerK = innerK,
+        innerN = innerN,
         hcodec = hcodec.MultiCodec,
         codec = codec.MultiCodec,
         ecK = ecK.int,
@@ -214,7 +252,10 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         treeCid = treeCid,
         datasetSize = datasetSize.NBytes,
         blockSize = blockSize.NBytes,
-        version = CidVersion(version),
+        version = version,
+        cidVersion = cidVersion.CidVersion,
+        innerK = innerK,
+        innerN = innerN,
         hcodec = hcodec.MultiCodec,
         codec = codec.MultiCodec,
         filename = filenameOption,
@@ -230,6 +271,8 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
     return Manifest.new(
       manifest = self,
+      treeCid = treeCid,
+      datasetSize = datasetSize.NBytes,
       verifyRoot = verifyRootCid,
       slotRoots = slotRootCids,
       cellSize = cellSize.NBytes,

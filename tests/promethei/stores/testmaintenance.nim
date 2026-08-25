@@ -236,7 +236,12 @@ suite "BlockMaintainer":
     for _ in 0 ..< 4:
       slotRoots.add(Cid.example)
 
-    let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+    let verManifest = Manifest
+      .new(
+        protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+        slotRoots,
+      )
+      .tryGet()
 
     # Create tree overlay with expiry in the past (clock is at 100)
     var bits = BitSeq.init(blocks.len)

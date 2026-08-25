@@ -270,7 +270,9 @@ suite "Erasure encode/decode":
         for i in 0 ..< encoded.numSlots:
           Cid.example
 
-      verifiable = Manifest.new(encoded, Cid.example, slotCids).tryGet()
+      verifiable = Manifest
+        .new(encoded, encoded.treeCid, encoded.datasetSize, Cid.example, slotCids)
+        .tryGet()
 
       decoded = (await erasure.decode(verifiable)).tryGet()
 
@@ -381,3 +383,58 @@ suite "Erasure encode/decode":
     )
     check enc2.isOk
     check enc2.tryGet() == parityRef
+
+  test "Should encode stripes deterministically":
+    let
+      k = 4
+      parityCount = 2
+      freshChunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
+      stripes = newSeqWith(k, (await freshChunker.getBytes()).tryGet())
+
+    let res1 = (await erasure.encodeStripes(stripes, parityCount)).tryGet()
+    let res2 = (await erasure.encodeStripes(stripes, parityCount)).tryGet()
+
+    check:
+      res1.len == parityCount
+      res1.allIt(it.len == stripes[0].len)
+      res1 == res2
+
+  test "Should encode zero-filled pad shards":
+    let
+      stripes = newSeqWith(3, newSeq[byte](BlockSize.int)) # all zeros
+      res = (await erasure.encodeStripes(stripes, 2)).tryGet()
+
+    check:
+      res.len == 2
+      res.allIt(it.len == BlockSize.int)
+
+  test "Should reject mismatched shard lengths":
+    let stripes = @[newSeq[byte](8), newSeq[byte](16)]
+    check (await erasure.encodeStripes(stripes, 2)).isErr
+
+    check (await erasure.encodeStripes(newSeq[seq[byte]](), 2)).isErr
+
+  test "encodeStripes parity matches encode for one outer step":
+    const
+      buffers = 3
+      parity = 2
+
+    let
+      encoded = await encode(buffers, parity)
+      # stepped layout: step 0 data = blocks 0, steps, 2*steps, ...
+      stepShards = block:
+        var shards: seq[seq[byte]]
+        for i in 0 ..< buffers:
+          shards.add(
+            (await store.getBlock(manifest.treeCid, i * encoded.steps)).tryGet().data
+          )
+        shards
+
+    # the same stripe encoded directly must equal the step's stored parity blocks
+    let stripeParity = (await erasure.encodeStripes(stepShards, parity)).tryGet()
+
+    for j in 0 ..< parity:
+      let
+        parityIdx = encoded.rounded + j * encoded.steps
+        storedParity = (await store.getBlock(encoded.treeCid, parityIdx)).tryGet()
+      check storedParity.data == stripeParity[j]

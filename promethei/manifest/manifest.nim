@@ -5,6 +5,7 @@
 import pkg/libp2p/protobuf/minprotobuf
 import pkg/libp2p/[cid, multihash, multicodec]
 import pkg/questionable/results
+import std/math
 
 import ../errors
 import ../utils
@@ -23,7 +24,8 @@ type Manifest* = ref object of RootObj
     # Size of each contained block (might not be needed if blocks are len-prefixed)
   codec: MultiCodec # Dataset codec
   hcodec: MultiCodec # Multihash codec
-  version: CidVersion # Cid version
+  cidVersion: CidVersion # Cid version
+  version: uint32 # Manifest version
   filename {.serialize.}: ?string # The filename of the content uploaded (optional)
   mimetype {.serialize.}: ?string # The mimetype of the content uploaded (optional)
   case protected {.serialize.}: bool # Protected datasets have erasure coded info
@@ -36,14 +38,24 @@ type Manifest* = ref object of RootObj
     case verifiable {.serialize.}: bool
     # Verifiable datasets can be used to generate storage proofs
     of true:
+      innerK: uint32 # inner cell code data shards (K)
+      innerN: uint32 # inner cell code total shards (N)
       verifyRoot: Cid # Root of the top level merkle tree built from slot roots
       slotRoots: seq[Cid] # Individual slot root built from the original dataset blocks
       cellSize: NBytes # Size of each slot cell
       verifiableStrategy: StrategyType # Indexing strategy used to build the slot roots
+      protectedTreeCid: Cid
+        # Root of the protected tree (verifiable view of the protected dataset)
+      protectedDatasetSize: NBytes # Physical size of the protected dataset
     else:
       discard
   else:
     discard
+
+const ManifestVersionV1* = 1'u32 # v1.0.0: locks cidVersion = CIDv1, parity packing
+const DefaultInnerK* = 1'u32 # inner cell code data shards (K); rate 1/2 = (1, 2)
+const DefaultInnerN* = 2'u32 # inner cell code total shards (N)
+  # inner cell-code parity shards per data shard (1 = rate 1/2)
 
 ############################################################
 # Accessors
@@ -55,8 +67,21 @@ func blockSize*(self: Manifest): NBytes =
 func datasetSize*(self: Manifest): NBytes =
   self.datasetSize
 
-func version*(self: Manifest): CidVersion =
+func version*(self: Manifest): uint32 =
   self.version
+
+func cidVersion*(self: Manifest): CidVersion =
+  self.cidVersion
+
+func innerK*(self: Manifest): uint32 =
+  self.innerK
+
+func innerN*(self: Manifest): uint32 =
+  self.innerN
+
+func innerParityFactor*(self: Manifest): int =
+  # parity shards per data shard: (N-K)/K must divide exactly (1/2 -> 1)
+  (self.innerN.int - self.innerK.int) div self.innerK.int
 
 func hcodec*(self: Manifest): MultiCodec =
   self.hcodec
@@ -109,11 +134,53 @@ func protectedStrategy*(self: Manifest): StrategyType =
 func verifiableStrategy*(self: Manifest): StrategyType =
   self.verifiableStrategy
 
+func protectedTreeCid*(self: Manifest): Cid =
+  self.protectedTreeCid
+
+func protectedDatasetSize*(self: Manifest): NBytes =
+  self.protectedDatasetSize
+
+func protectedBlocksCount*(self: Manifest): int =
+  # Protected partition of a verifiable manifest (physical size); blocksCount otherwise
+  if self.verifiable:
+    divUp(self.protectedDatasetSize.int, self.blockSize.int)
+  else:
+    self.blocksCount
+
+func dataBlocksPerSlot*(self: Manifest): int =
+  # Exact when verify() holds; LinearStrategy clamps to lastIndex otherwise
+  divUp(self.protectedBlocksCount, self.numSlots)
+
 func numSlotBlocks*(self: Manifest): int =
   divUp(self.blocksCount, self.numSlots)
 
 func slotSize*(self: Manifest): NBytes =
   (self.blockSize.int * self.numSlotBlocks).NBytes
+
+# 2.5D geometry
+func numBlockCells*(self: Manifest): int =
+  # - cellSize lives in the verifiable branch
+  # - non-verifiable manifests use the default
+  # (consistent with a default-constructed builder)
+
+  let cellSize = if self.verifiable: self.cellSize else: DefaultCellSize
+  self.blockSize.int div cellSize.int
+
+func numPadSlotBlocks*(self: Manifest): int =
+  nextPowerOfTwo(self.dataBlocksPerSlot * self.numBlockCells) div self.numBlockCells -
+    self.dataBlocksPerSlot
+
+func numSlotBlocksTotal*(self: Manifest): int =
+  self.dataBlocksPerSlot + self.numPadSlotBlocks
+
+func firstPassParityBlocks*(self: Manifest): int =
+  self.numSlotBlocksTotal * self.innerParityFactor
+
+func secondPassParityBlocks*(self: Manifest): int =
+  (1 + self.innerParityFactor) * self.numSlotBlocksTotal * self.innerParityFactor
+
+func parityBlocksPerSlot*(self: Manifest): int =
+  self.firstPassParityBlocks + self.secondPassParityBlocks
 
 func filename*(self: Manifest): ?string =
   self.filename
@@ -131,21 +198,42 @@ func isManifest*(cid: Cid): ?!bool =
 func isManifest*(mc: MultiCodec): ?!bool =
   success mc == ManifestCodec
 
-proc getSlotBlockIterator*(self: Manifest, slotIdx: int): ?!Iter[int] =
+proc getBlocksIterator*(self: Manifest): Iter[int] =
+  Iter[int].new(0 ..< self.blocksCount)
+
+proc getOriginalIterator*(self: Manifest): ?!Iter[int] =
+  if not self.protected:
+    return failure("Manifest is not protected")
+  success Iter[int].new(0 ..< self.originalBlocksCount)
+
+proc getSlotIterator*(self: Manifest, slotIdx: int): ?!Iter[int] =
   if not self.protected:
     return failure("Manifest is not protected")
   if not self.verifiable:
     return failure("Manifest is not verifiable")
 
   without indexer =?
-    self.verifiableStrategy.init(0, self.blocksCount - 1, self.numSlots).catch, err:
+    self.verifiableStrategy.init(0, self.protectedBlocksCount - 1, self.numSlots).catch,
+    err:
     error "Unable to create indexing strategy from protected manifest", err = err.msg
     return failure(err)
 
   without blksIter =? indexer.getIndices(slotIdx).catch, err:
     error "Unable to get indices from strategy", err = err.msg
     return failure(err)
-  return success(blksIter)
+
+  let
+    slot = slotIdx
+    parityPerSlot = self.parityBlocksPerSlot
+    protectedCount = self.protectedBlocksCount
+  success Iter[int].new(
+    iterator (): int {.gcsafe.} =
+      for v in blksIter:
+        yield v # data indices (real indices only; no synthetic pads)
+      for i in 0 ..< parityPerSlot:
+        yield protectedCount + slot * parityPerSlot + i
+
+  ) # position(slot, i)
 
 ############################################################
 # Various sizes and verification
@@ -163,7 +251,15 @@ func verify*(self: Manifest): ?!void =
   ## Check manifest correctness
   ##
 
-  if self.protected and (self.blocksCount != self.steps * (self.ecK + self.ecM)):
+  if self.innerK == 0 or (
+    (self.innerN.int - self.innerK.int) mod self.innerK.int != 0
+  ):
+    return
+      failure newException(ArchivistError, "Broken manifest: inner code rate not supported")
+
+  if self.protected and (
+    self.protectedBlocksCount != self.steps * (self.ecK + self.ecM)
+  ):
     return
       failure newException(PrometheiError, "Broken manifest: wrong originalBlocksCount")
 
@@ -171,9 +267,10 @@ func verify*(self: Manifest): ?!void =
 
 func `==`*(a, b: Manifest): bool =
   (a.treeCid == b.treeCid) and (a.datasetSize == b.datasetSize) and
-    (a.blockSize == b.blockSize) and (a.version == b.version) and (a.hcodec == b.hcodec) and
-    (a.codec == b.codec) and (a.protected == b.protected) and (a.filename == b.filename) and
-    (a.mimetype == b.mimetype) and (
+    (a.blockSize == b.blockSize) and (a.version == b.version) and
+    (a.cidVersion == b.cidVersion) and (a.innerK == b.innerK) and (a.innerN == b.innerN) and
+    (a.hcodec == b.hcodec) and (a.codec == b.codec) and (a.protected == b.protected) and
+    (a.filename == b.filename) and (a.mimetype == b.mimetype) and (
     if a.protected:
       (a.ecK == b.ecK) and (a.ecM == b.ecM) and (a.originalTreeCid == b.originalTreeCid) and
         (a.originalDatasetSize == b.originalDatasetSize) and
@@ -183,7 +280,8 @@ func `==`*(a, b: Manifest): bool =
           (a.verifyRoot == b.verifyRoot) and (a.slotRoots == b.slotRoots) and
             (a.cellSize == b.cellSize) and (
             a.verifiableStrategy == b.verifiableStrategy
-          )
+          ) and (a.protectedTreeCid == b.protectedTreeCid) and
+            (a.protectedDatasetSize == b.protectedDatasetSize)
         else:
           true
       )
@@ -194,8 +292,9 @@ func `==`*(a, b: Manifest): bool =
 func `$`*(self: Manifest): string =
   result =
     "treeCid: " & $self.treeCid & ", datasetSize: " & $self.datasetSize & ", blockSize: " &
-    $self.blockSize & ", version: " & $self.version & ", hcodec: " & $self.hcodec &
-    ", codec: " & $self.codec & ", protected: " & $self.protected
+    $self.blockSize & ", version: " & $self.version & ", cidVersion: " & $self.cidVersion &
+    ", innerK: " & $self.innerK & ", innerN: " & $self.innerN & ", hcodec: " & $self.hcodec & ", codec: " &
+    $self.codec & ", protected: " & $self.protected
 
   if self.filename.isSome:
     result &= ", filename: " & $self.filename
@@ -209,7 +308,9 @@ func `$`*(self: Manifest): string =
         $self.originalTreeCid & ", originalDatasetSize: " & $self.originalDatasetSize &
         ", verifiable: " & $self.verifiable & (
         if self.verifiable:
-          ", verifyRoot: " & $self.verifyRoot & ", slotRoots: " & $self.slotRoots
+          ", verifyRoot: " & $self.verifyRoot & ", slotRoots: " & $self.slotRoots &
+            ", protectedTreeCid: " & $self.protectedTreeCid & ", protectedDatasetSize: " &
+            $self.protectedDatasetSize
         else:
           ""
       )
@@ -228,7 +329,10 @@ func new*(
     treeCid: Cid,
     blockSize: NBytes,
     datasetSize: NBytes,
-    version: CidVersion = CIDv1,
+    version: uint32 = ManifestVersionV1,
+    cidVersion: CidVersion = CIDv1,
+    innerK: uint32 = DefaultInnerK,
+    innerN: uint32 = DefaultInnerN,
     hcodec = Sha256HashCodec,
     codec = BlockCodec,
     protected = false,
@@ -240,6 +344,9 @@ func new*(
     blockSize: blockSize,
     datasetSize: datasetSize,
     version: version,
+    cidVersion: cidVersion,
+    innerK: innerK,
+    innerN: innerN,
     codec: codec,
     hcodec: hcodec,
     protected: protected,
@@ -263,6 +370,9 @@ func new*(
     treeCid: treeCid,
     datasetSize: datasetSize,
     version: manifest.version,
+    cidVersion: manifest.cidVersion,
+    innerK: manifest.innerK,
+    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -285,6 +395,9 @@ func new*(T: type Manifest, manifest: Manifest): Manifest =
     treeCid: manifest.originalTreeCid,
     datasetSize: manifest.originalDatasetSize,
     version: manifest.version,
+    cidVersion: manifest.cidVersion,
+    innerK: manifest.innerK,
+    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -298,7 +411,10 @@ func new*(
     treeCid: Cid,
     datasetSize: NBytes,
     blockSize: NBytes,
-    version: CidVersion,
+    version: uint32 = ManifestVersionV1,
+    cidVersion: CidVersion = CIDv1,
+    innerK: uint32 = DefaultInnerK,
+    innerN: uint32 = DefaultInnerN,
     hcodec: MultiCodec,
     codec: MultiCodec,
     ecK: int,
@@ -314,6 +430,9 @@ func new*(
     datasetSize: datasetSize,
     blockSize: blockSize,
     version: version,
+    cidVersion: cidVersion,
+    innerK: innerK,
+    innerN: innerN,
     hcodec: hcodec,
     codec: codec,
     protected: true,
@@ -328,13 +447,15 @@ func new*(
 
 func new*(
     T: type Manifest,
-    manifest: Manifest,
+    manifest: Manifest, # protected source
+    treeCid: Cid, # verifiable sha root (top-level)
+    datasetSize: NBytes, # verifiable physical size (top-level)
     verifyRoot: Cid,
     slotRoots: openArray[Cid],
     cellSize = DefaultCellSize,
     strategy = LinearStrategy,
 ): ?!Manifest =
-  ## Create a verifiable dataset from an
+  ## Create a verifiable dataset from a
   ## protected one
   ##
 
@@ -347,9 +468,12 @@ func new*(
     return failure newException(PrometheiError, "Wrong number of slot roots.")
 
   success Manifest(
-    treeCid: manifest.treeCid,
-    datasetSize: manifest.datasetSize,
+    treeCid: treeCid,
+    datasetSize: datasetSize,
     version: manifest.version,
+    cidVersion: manifest.cidVersion,
+    innerK: manifest.innerK,
+    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -364,6 +488,8 @@ func new*(
     slotRoots: @slotRoots,
     cellSize: cellSize,
     verifiableStrategy: strategy,
+    protectedTreeCid: manifest.treeCid,
+    protectedDatasetSize: manifest.datasetSize,
     filename: manifest.filename,
     mimetype: manifest.mimetype,
   )
@@ -373,3 +499,28 @@ func new*(T: type Manifest, data: openArray[byte]): ?!Manifest =
   ##
 
   Manifest.decode(data)
+
+func protectedView*(self: Manifest): ?!Manifest =
+  ## Protected (non-verifiable) view of a verifiable manifest;
+  ## repair addressing uses the protected root
+  if not self.verifiable:
+    return failure newException(ArchivistError, "Manifest is not verifiable")
+  success Manifest(
+    treeCid: self.protectedTreeCid,
+    datasetSize: self.protectedDatasetSize,
+    version: self.version,
+    cidVersion: self.cidVersion,
+    innerK: self.innerK,
+    innerN: self.innerN,
+    codec: self.codec,
+    hcodec: self.hcodec,
+    blockSize: self.blockSize,
+    protected: true,
+    ecK: self.ecK,
+    ecM: self.ecM,
+    originalTreeCid: self.originalTreeCid,
+    originalDatasetSize: self.originalDatasetSize,
+    protectedStrategy: self.protectedStrategy,
+    filename: self.filename,
+    mimetype: self.mimetype,
+  )

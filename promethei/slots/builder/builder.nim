@@ -21,6 +21,9 @@ import ../../merkletree
 import ../../merkletree/asyncposeidon2
 import ../../indexingstrategy
 import ../../prometheitypes
+import ../../erasure
+import ../../errors
+import ../../blocktype as bt
 
 import ../converters
 
@@ -28,6 +31,8 @@ export converters, iter, asyncposeidon2
 
 logScope:
   topics = "promethei slotsbuilder"
+
+const DefaultSlotBuildConcurrency* = 4
 
 type SlotsBuilder*[SomeTree, SomeHash] = ref object of RootObj
   networkStore: BlockStore
@@ -41,6 +46,11 @@ type SlotsBuilder*[SomeTree, SomeHash] = ref object of RootObj
   emptyBlock: seq[byte] # empty block
   verifiableTree: ?SomeTree # verification tree (dataset tree)
   emptyDigestTree: SomeTree # empty digest tree for empty blocks
+  erasure: Erasure # 2.5D inner-code encoder
+  parityRoot: ?Cid
+    # root under which parity blocks live (tmpCid during client build;
+    # manifest.treeCid for a provider/verifiable builder)
+  verifiableRoot: ?Cid # verifiable sha root, set by buildSlots from the finalize result
 
 func verifiable*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash]
@@ -89,6 +99,20 @@ func numSlotBlocks*[SomeTree, SomeHash](
 
   self.numSlotBlocks
 
+func numSlotBlocksTotal*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash]
+): Natural =
+  ## Number of blocks per slot including pow2 pads (the slot tree's data leaves).
+  ##
+
+  self.numSlotBlocks
+
+func verifiableRoot*[SomeTree, SomeHash](self: SlotsBuilder[SomeTree, SomeHash]): ?Cid =
+  ## Verifiable sha tree root, set after a client build.
+  ##
+
+  self.verifiableRoot
+
 func numBlocks*[SomeTree, SomeHash](self: SlotsBuilder[SomeTree, SomeHash]): Natural =
   ## Number of blocks.
   ##
@@ -112,10 +136,14 @@ func cellSize*[SomeTree, SomeHash](self: SlotsBuilder[SomeTree, SomeHash]): NByt
 func numSlotCells*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash]
 ): Natural =
-  ## Number of cells per slot.
+  ## Number of cells per slot - the FULL sampling space (data, pad, and
+  ## parity leaves)
   ##
 
-  self.numBlockCells * self.numSlotBlocks
+  self.numBlockCells *
+    (self.numSlotBlocks +
+     self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) *
+       self.numSlotBlocks)
 
 func slotIndicesIter*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], slot: Natural
@@ -140,30 +168,74 @@ func manifest*[SomeTree, SomeHash](self: SlotsBuilder[SomeTree, SomeHash]): Mani
   self.manifest
 
 proc buildBlockTree*[SomeTree, SomeHash](
-    self: SlotsBuilder[SomeTree, SomeHash], blkIdx: Natural, slotPos: Natural
+    self: SlotsBuilder[SomeTree, SomeHash], root: Cid, blkIdx: Natural, slotPos: Natural
 ): Future[?!(seq[byte], SomeTree)] {.async: (raises: [CancelledError]).} =
   ## Build the block digest tree and return a tuple with the
   ## block data and the tree.
   ##
+  ## `root` is the tree the block is read from; `slotPos` is the leaf
+  ## position within the slot - data-region pad positions (>= dataBlocksPerSlot)
+  ## yield the empty digest tree. Parity leaves are handled by the callers.
+  ##
 
   logScope:
+    root = root
     blkIdx = blkIdx
     slotPos = slotPos
-    numSlotBlocks = self.manifest.numSlotBlocks
+    dataBlocksPerSlot = self.manifest.dataBlocksPerSlot
     cellSize = self.cellSize
 
   trace "Building block tree"
-  if slotPos > (self.manifest.numSlotBlocks - 1):
+  if slotPos > (self.manifest.dataBlocksPerSlot - 1):
     # pad blocks are 0 byte blocks
     trace "Returning empty digest tree for pad block"
     return success (self.emptyBlock, self.emptyDigestTree)
 
-  let blk = ?await self.networkStore.getBlock(self.manifest.treeCid, blkIdx)
+  let blk = ?await self.networkStore.getBlock(root, blkIdx)
   if blk.isEmpty:
     return success (self.emptyBlock, self.emptyDigestTree)
 
   let tree = ?SomeTree.digestTree(blk.data, self.cellSize.int)
   success (blk.data, tree)
+
+proc getStoredCid*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash], root: Cid, index: Natural
+): Future[?!Cid] {.async: (raises: [CancelledError]).} =
+  ## Leaf CID at `index` under `root`; missing leaf records (erasure
+  ## zero-pads) yield the empty CID.
+  ##
+
+  let res = await self.repoStore.getCid(root, index)
+  if res.isErr:
+    if res.error of BlockNotFoundError:
+      return
+        success(?emptyCid(self.manifest.cidVersion, self.manifest.hcodec, BlockCodec))
+    return failure(res.error)
+  success(res.get)
+
+proc buildVerifiableLeafCids*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash]
+): Future[?!ref seq[Cid]] {.async: (raises: [CancelledError]).} =
+  ## Leaf CID list for the verifiable tree: protected leaves (position
+  ## order, empty CID for missing records) ++ per-slot parity leaves
+  ## (position order, read from the parity root).
+  ##
+
+  let
+    protectedCount = self.manifest.protectedBlocksCount
+    parityPerSlot = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+  var leafCids = newSeq[Cid](protectedCount + self.manifest.numSlots * parityPerSlot)
+  for idx in 0 ..< protectedCount:
+    leafCids[idx] = ?await self.getStoredCid(self.manifest.treeCid, idx.Natural)
+
+  without parityRoot =? self.parityRoot, e:
+    return failure(e)
+  for pos in protectedCount ..< leafCids.len:
+    leafCids[pos] = ?await self.getStoredCid(parityRoot, pos.Natural)
+
+  var cids = seq[Cid].new()
+  cids[] = move leafCids
+  success cids
 
 proc getCellHashes*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], slotIndex: Natural
@@ -191,7 +263,7 @@ proc getCellHashes*[SomeTree, SomeHash](
 
       trace "Getting block CID for tree at index"
       let
-        (_, tree) = ?await self.buildBlockTree(blkIdx, i)
+        (_, tree) = ?await self.buildBlockTree(self.manifest.treeCid, blkIdx, i)
         digest = ?tree.root
 
       trace "Get block digest", digest = digest.toHex
@@ -199,51 +271,105 @@ proc getCellHashes*[SomeTree, SomeHash](
 
   success hashes
 
+proc getSlotLeafBlock*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash],
+    slotIndex: Natural,
+    dataRoot: Cid,
+    parityRoot: Cid,
+    slotPos: Natural,
+): Future[?!(seq[byte], SomeTree)] {.async: (raises: [CancelledError]).} =
+  ## Block data + digest tree for a slot leaf position `slotPos` - the one
+  ## flat position function over the slot's leaves:
+  ##
+  ##   p <  numSlotBlocksTotal -> strategy index (outer-EC interleave)
+  ##   p >= numSlotBlocksTotal -> protectedBlocksCount + slot*parityPerSlot + (p - T)
+  ##
+  ## Data pads yield the empty digest tree; parity blocks are read from
+  ## `parityRoot`.
+  ##
+
+  if slotPos < self.numSlotBlocks:
+    let indices = ?self.slotIndices(slotIndex)
+    success(?await self.buildBlockTree(dataRoot, indices[slotPos], slotPos))
+  else:
+    let
+      protectedCount = self.manifest.protectedBlocksCount
+      parityPerSlot = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+      blk = ?await self.networkStore.getBlock(
+        parityRoot,
+        protectedCount + slotIndex * parityPerSlot + (slotPos - self.numSlotBlocks),
+      )
+    if blk.isEmpty:
+      return failure "Empty parity block"
+    let tree = ?SomeTree.digestTree(blk.data, self.cellSize.int)
+    success((blk.data, tree))
+
 proc buildSlotTree*[SomeTree, SomeHash](
-    self: SlotsBuilder[SomeTree, SomeHash], slotIndex: Natural, tp: Taskpool
+    self: SlotsBuilder[SomeTree, SomeHash],
+    slotIndex: Natural,
+    dataRoot: Cid,
+    parityRoot: Cid,
+    tp: Taskpool,
 ): Future[?!SomeTree] {.async: (raises: [CancelledError]).} =
   ## Build the slot tree from the block digest hashes, streaming them into
   ## the async tree builder so layer compression runs on the taskpool while
   ## the block digest trees are fetched.
   ##
-  ## The strategy indices are consumed by slot position: pad positions (past
-  ## the real block count) yield the empty digest root, mirroring
-  ## getCellHashes.
+  ## The slot's leaves are the data blocks (strategy indices, consumed by
+  ## slot position; pad positions past the data count yield the empty digest
+  ## root, mirroring getCellHashes) followed by the parity blocks at
+  ## positions `position(slotIndex, i)` under `parityRoot`.
+  ##
 
-  let indices = toSeq(?catch(self.strategy.getIndices(slotIndex)))
+  let
+    dataLeaves = self.numSlotBlocks
+    parityLeaves = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
 
   proc digestAt(pos: int): Future[SomeHash] {.async.} =
-    ## Root of the block digest tree at slot position `pos`; raises on fetch
-    ## or build failure (the async tree builder surfaces it as a failed leaf).
-    if pos > (self.manifest.numSlotBlocks - 1).int:
-      # pad block: no real block, use the empty digest tree root
-      return self.emptyDigestTree.root.tryGet
-    let (_, tree) = (await self.buildBlockTree(indices[pos], pos)).tryGet
+    ## Root of the block digest tree at slot leaf position `pos`; raises on
+    ## fetch or build failure (the async tree builder surfaces it as a failed leaf).
+    let (_, tree) = (
+      await self.getSlotLeafBlock(slotIndex, dataRoot, parityRoot, pos.Natural)
+    ).tryGet
     return tree.root.tryGet
 
   let
-    items = mapAsync[int, SomeHash](Iter[int].new(0 ..< indices.len), digestAt)
+    items =
+      mapAsync[int, SomeHash](Iter[int].new(0 ..< dataLeaves + parityLeaves), digestAt)
     tree = ?await SomeTree.buildAsync(items, tp)
 
   success tree
 
-proc buildSlot*[SomeTree, SomeHash](
-    self: SlotsBuilder[SomeTree, SomeHash], slotIndex: Natural, tp: Taskpool
+proc sealSlot*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash],
+    slotIndex: Natural,
+    dataRoot: Cid,
+    parityRoot: Cid,
+    tp: Taskpool,
 ): Future[?!SomeHash] {.async: (raises: [CancelledError]).} =
-  ## Build a slot tree and store the proofs in
-  ## the block store.
+  ## Seal a slot: build the slot tree over the data + parity block digests
+  ## and store the proofs in the block store. Parity CIDs are derived from
+  ## `parityRoot` + geometry (the parity block's CID doubles as the leaf's
+  ## blkCid - no separate CID list).
   ##
 
   logScope:
-    cid = self.manifest.treeCid
+    dataRoot = dataRoot
+    parityRoot = parityRoot
     slotIndex = slotIndex
 
-  trace "Building slot tree"
+  trace "Sealing slot tree"
 
-  without tree =? (await self.buildSlotTree(slotIndex, tp)) and
+  without tree =? (await self.buildSlotTree(slotIndex, dataRoot, parityRoot, tp)) and
     treeCid =? tree.root .? toSlotCid, e:
     error "Failed to build slot tree", e = e.msg
     return failure(e)
+
+  let
+    indices = toSeq(?catch(self.strategy.getIndices(slotIndex)))
+    dataLeaves = indices.len
+    parityLeaves = self.manifest.innerParityFactor * (2 + self.manifest.innerParityFactor) * self.numSlotBlocks
+    protectedCount = self.manifest.protectedBlocksCount
 
   trace "Storing slot tree", treeCid, slotIndex, leaves = tree.leavesCount
   ?await self.repoStore.withOverlay(
@@ -251,32 +377,148 @@ proc buildSlot*[SomeTree, SomeHash](
     status = Storing.some,
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       var proofItems: seq[(Natural, Cid, Cid, PrometheiProof)]
-      for i, blkIdx in ?self.slotIndicesIter(slotIndex):
-        without cellCid =? tree.leaves[i].toCellCid, e:
+      for pos in 0 ..< dataLeaves + parityLeaves:
+        without cellCid =? tree.leaves[pos].toCellCid, e:
           error "Failed to get CID for slot cell", e = e.msg
           return failure(e)
 
-        without proof =? tree.getProof(i) and encodableProof =? proof.toEncodableProof,
+        without proof =? tree.getProof(pos) and encodableProof =? proof.toEncodableProof,
           e:
           error "Failed to get proof for slot tree", e = e.msg
           return failure(e)
 
-        # For pad blocks, use empty CID for blkCid since there's no real block
-        # TODO: make sure we do this as a batch, single get/put are very costly
-        # with CAS semantics
         let blkCid =
-          if blkIdx >= self.manifest.numSlotBlocks:
-            ?emptyCid(self.manifest.version, self.manifest.hcodec, BlockCodec)
+          if pos < dataLeaves:
+            if pos >= self.manifest.dataBlocksPerSlot:
+              # pad block: no real block
+              ?emptyCid(self.manifest.cidVersion, self.manifest.hcodec, BlockCodec)
+            else:
+              ?await self.getStoredCid(dataRoot, indices[pos])
           else:
-            ?await self.repoStore.getCid(self.manifest.treeCid, blkIdx)
+            let blk =
+              ?await self.networkStore.getBlock(
+                parityRoot,
+                protectedCount + slotIndex * parityLeaves + (pos - dataLeaves),
+              )
+            blk.cid
 
-        proofItems.add((i.Natural, cellCid, blkCid, encodableProof))
+        proofItems.add((pos.Natural, cellCid, blkCid, encodableProof))
 
       ?await self.repoStore.putCellCidsAndProofs(treeCid, proofItems)
       success(),
   )
 
   tree.root()
+
+proc encodeSlot*[SomeTree, SomeHash](
+    self: SlotsBuilder[SomeTree, SomeHash],
+    slotIndex: Natural,
+    targetRoot: Cid,
+    tp: Taskpool,
+): Future[?!seq[Cid]] {.async: (raises: [CancelledError]).} =
+  ## Encode the slot's two 2.5D passes and write the parity blocks under
+  ## `targetRoot` (the CURRENT overlay). Returns the slot's parity CIDs in
+  ## position order [pass1 ++ pass2].
+  ##
+  ## The inner cell code is (K, N) from the manifest; `rate` = (N-K)/K
+  ## parity shards per data shard.
+  ##
+  ## Pass 1 (row-wise): each block's C cells encode to C*rate parity cells
+  ## = `rate` compound parity blocks per data block -> T*rate blocks.
+  ##
+  ## Pass 2 (column-wise, a TRUE product code): each cell-row of ALL
+  ## C*(1+rate) columns (data cells AND pass-1 parity cells) is encoded;
+  ## the parity-of-parity corner is interleaved across the pass-2 region:
+  ## pass2Block[(1+rate)*s + r][c] = parity shard s of cell-row r*C + c
+  ## (r=0 blocks carry data-column parity, r>=1 blocks the corner).
+  ## -> (1+rate)*T*rate blocks.
+  ##
+
+  logScope:
+    targetRoot = targetRoot
+    slotIndex = slotIndex
+
+  trace "Encoding slot parity"
+  let
+    numSlotBlocks = self.numSlotBlocks
+    numBlockCells = self.numBlockCells
+    cellSize = self.cellSize.int
+    protectedCount = self.manifest.protectedBlocksCount
+    rate = self.manifest.innerParityFactor
+    firstPass = rate * self.numSlotBlocks
+    parityPerSlot = rate * (2 + rate) * self.numSlotBlocks
+
+  # 1. Data materialization: real blocks + zero-fill for pads
+  let indices = ?self.slotIndices(slotIndex)
+  var blocks = newSeq[seq[byte]](indices.len)
+  for i, idx in indices:
+    blocks[i] =
+      if idx < protectedCount:
+        let blk = ?await self.networkStore.getBlock(self.manifest.treeCid, idx)
+        blk.data
+      else:
+        self.emptyBlock
+
+  # 2. Pass 1 - row-wise: C cells -> C(1+rate) cells (rate compound parity
+  #    blocks per row)
+  var pass1Blocks: seq[seq[byte]]
+  for b in 0 ..< numSlotBlocks:
+    var stripe: seq[seq[byte]]
+    for c in 0 ..< numBlockCells:
+      stripe.add(blocks[b][c * cellSize ..< (c + 1) * cellSize])
+    let parity = ?await self.erasure.encodeStripes(stripe, numBlockCells * rate)
+    for i in 0 ..< rate:
+      pass1Blocks.add(concat(parity[i * numBlockCells ..< (i + 1) * numBlockCells]))
+
+  # 3. Pass 2 - column-wise over ALL C(1+rate) cell-rows (data rows AND
+  #    pass-1 parity rows); interleaved bottom-right corner
+  var pass2Blocks = newSeq[seq[byte]]((1 + rate) * rate * numSlotBlocks)
+  for j in 0 ..< (1 + rate) * numBlockCells:
+    let
+      r = j div numBlockCells
+      c = j mod numBlockCells
+    var stripe: seq[seq[byte]]
+    for b in 0 ..< numSlotBlocks:
+      let
+        data =
+          if r == 0:
+            blocks[b]
+          else:
+            pass1Blocks[b * rate + (r - 1)]
+        start = c * cellSize
+      stripe.add(data[start ..< start + cellSize])
+    let parity = ?await self.erasure.encodeStripes(stripe, numSlotBlocks * rate)
+    for s in 0 ..< numSlotBlocks * rate:
+      pass2Blocks[(1 + rate) * s + r].add(parity[s])
+
+  # 4. Store at position(slotIndex, pass, i) under targetRoot
+  var
+    items: seq[(bt.Block, Natural, ?PrometheiProof)]
+    parityCids: seq[Cid]
+
+  for i, data in pass1Blocks:
+    let blk = ?bt.Block.new(data)
+    parityCids.add(blk.cid)
+    items.add(
+      (
+        blk,
+        (protectedCount + slotIndex * parityPerSlot + i).Natural,
+        PrometheiProof.none,
+      )
+    )
+  for i, data in pass2Blocks:
+    let blk = ?bt.Block.new(data)
+    parityCids.add(blk.cid)
+    items.add(
+      (
+        blk,
+        (protectedCount + slotIndex * parityPerSlot + firstPass + i).Natural,
+        PrometheiProof.none,
+      )
+    )
+
+  ?await self.networkStore.putBlocks(targetRoot, items)
+  success parityCids
 
 func buildVerifyTree*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], slotRoots: openArray[SomeHash]
@@ -286,53 +528,130 @@ func buildVerifyTree*[SomeTree, SomeHash](
 proc buildSlots*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], tp: Taskpool
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Build all slot trees and store them in the block store.
+  ## Build all slot trees and the verifiable tree, and store them.
+  ##
+  ## Client-construction only: per-slot parity is encoded under a temporary
+  ## overlay, slot trees are sealed as real overlays, and the verifiable sha
+  ## tree over the protected leaves + per-slot parity leaves is finalized
+  ## into the verifiable root (set on `self.verifiableRoot`).
   ##
 
   logScope:
     cid = self.manifest.treeCid
-    blockCount = self.manifest.blocksCount
+    blockCount = self.manifest.protectedBlocksCount
 
   trace "Building slots"
 
   if self.slotRoots.len == 0:
-    self.slotRoots = collect(newSeq):
-      for i in 0 ..< self.manifest.numSlots:
-        ?await self.buildSlot(i, tp)
+    let semaphore = newAsyncSemaphore(DefaultSlotBuildConcurrency)
 
-  without tree =? self.buildVerifyTree(self.slotRoots) and root =? tree.root, e:
-    error "Failed to build slot roots tree", e = e.msg
-    return failure(e)
+    var created: seq[Cid]
 
-  if verifyTree =? self.verifyTree and verifyRoot =? verifyTree.root:
-    if not bool(verifyRoot == root): # TODO: `!=` doesn't work for SecretBool
-      return failure "Existing slots root doesn't match reconstructed root."
+    proc sealOne(
+        slotIndex: Natural, tmpCid: Cid
+    ): Future[?!SomeHash] {.async: (raises: [CancelledError]).} =
+      ## Encode the slot's parity under the tmp overlay and seal the slot tree.
+      await semaphore.acquire()
+      try:
+        discard ?await self.encodeSlot(slotIndex, tmpCid, tp)
+        self.parityRoot = tmpCid.some
+        success(?await self.sealSlot(slotIndex, self.manifest.treeCid, tmpCid, tp))
+      finally:
+        ?catch(semaphore.release())
 
-  self.verifiableTree = some tree
+    let buildRes = await self.repoStore.withTmpOverlay(
+      body = proc(
+          tmpCid: Cid
+      ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
+        let
+          futures = collect(newSeq):
+            for i in 0 ..< self.manifest.numSlots:
+              sealOne(i.Natural, tmpCid)
+          slotResults = await allFinished(futures)
+
+        var slotRoots: seq[SomeHash]
+        for i, fut in slotResults:
+          if fut.failed:
+            return failure(fut.error)
+          let slotRes = ?catch(fut.read())
+          if slotRes.isErr:
+            return failure(slotRes.error)
+          slotRoots.add(slotRes.get)
+
+        for slotRoot in slotRoots:
+          self.slotRoots.add(slotRoot)
+          without slotCid =? slotRoot.toSlotCid, e:
+            return failure(e)
+          created.add(slotCid)
+
+        without tree =? self.buildVerifyTree(self.slotRoots) and root =? tree.root, e:
+          error "Failed to build slot roots tree", e = e.msg
+          return failure(e)
+        self.verifiableTree = some tree
+
+        # verifiable sha tree over the protected leaves ++ per-slot parity leaves
+        success(
+          ?await self.erasure.treeAndProofs(
+            ?await self.buildVerifiableLeafCids(), tmpCid
+          )
+        )
+    )
+
+    if buildRes.isErr:
+      # drop created slot overlays (withTmpOverlay drops the tmp overlay itself)
+      for c in created:
+        if err =? (await self.repoStore.dropOverlay(c)).errorOption:
+          error "Failed to drop slot overlay on failed build", c = c, err = err.msg
+      return failure(buildRes.error)
+    self.verifiableRoot = buildRes.get.some
+  else:
+    without tree =? self.buildVerifyTree(self.slotRoots) and root =? tree.root, e:
+      error "Failed to build slot roots tree", e = e.msg
+      return failure(e)
+
+    if verifyTree =? self.verifyTree and verifyRoot =? verifyTree.root:
+      if not bool(verifyRoot == root): # TODO: `!=` doesn't work for SecretBool
+        return failure "Existing slots root doesn't match reconstructed root."
+
+    self.verifiableTree = some tree
 
   success()
 
 proc buildManifest*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], tp: Taskpool
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
-  ## Build the manifest with the slot roots and return it.
+  ## Build the manifest with the slot roots and the verifiable root and
+  ## return it.
   ##
 
-  ?await self.buildSlots(tp) # build the slots
+  ?await self.buildSlots(tp) # build the slots + verifiable root
   let rootCids = ?self.slotRoots.toSlotCids()
   without rootProvingCidRes =? self.verifyRoot .? toVerifyCid() and
     rootProvingCid =? rootProvingCidRes, e:
     error "Failed to map slot roots to CIDs", e = e.msg
     return failure(e)
 
+  without verifiableRoot =? self.verifiableRoot, e:
+    error "Verifiable root missing", e = e.msg
+    return failure(e)
+
+  let verifiableSize = (
+    self.manifest.blockSize.int * (
+      self.manifest.protectedBlocksCount +
+      self.manifest.numSlots * 3 * self.manifest.innerParityFactor * self.numSlotBlocks
+    )
+  ).NBytes
+
   Manifest.new(
-    self.manifest, rootProvingCid, rootCids, self.cellSize, self.strategy.strategyType
+    self.manifest, verifiableRoot, verifiableSize, rootProvingCid, rootCids,
+    self.cellSize, self.strategy.strategyType,
   )
 
 proc new*[SomeTree, SomeHash](
     _: type SlotsBuilder[SomeTree, SomeHash],
     networkStore: BlockStore,
     repoStore: RepoStore,
+    erasure: Erasure,
     manifest: Manifest,
     strategy = LinearStrategy,
     cellSize = DefaultCellSize,
@@ -358,9 +677,11 @@ proc new*[SomeTree, SomeHash](
     return failure(msg)
 
   let
-    numSlotBlocks = manifest.numSlotBlocks
+    numSlotBlocks = manifest.dataBlocksPerSlot
+      # data-region blocks per slot (never manifest.numSlotBlocks - enlarged
+      # physical count on verifiable manifests)
     numBlockCells = (manifest.blockSize div cellSize).int # number of cells per block
-    numSlotCells = manifest.numSlotBlocks * numBlockCells
+    numSlotCells = manifest.dataBlocksPerSlot * numBlockCells
       # number of uncorrected slot cells
     pow2SlotCells = nextPowerOfTwo(numSlotCells) # pow2 cells per slot
     numPadSlotBlocks = (pow2SlotCells div numBlockCells) - numSlotBlocks
@@ -381,7 +702,7 @@ proc new*[SomeTree, SomeHash](
     strategy =
       ?strategy.init(
         0,
-        manifest.blocksCount - 1,
+        manifest.protectedBlocksCount - 1,
         manifest.numSlots,
         manifest.numSlots,
         numPadSlotBlocks,
@@ -408,6 +729,7 @@ proc new*[SomeTree, SomeHash](
     emptyBlock: emptyBlock,
     numSlotBlocks: numSlotBlocksTotal,
     emptyDigestTree: emptyDigestTree,
+    erasure: erasure,
   )
 
   if manifest.verifiable:
@@ -425,5 +747,6 @@ proc new*[SomeTree, SomeHash](
 
     self.slotRoots = slotRoots
     self.verifiableTree = some tree
+    self.parityRoot = manifest.treeCid.some
 
   success self

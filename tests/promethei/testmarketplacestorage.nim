@@ -40,7 +40,7 @@ suite "Marketplace storage interface implementation":
     let erasure = Erasure.new(networkStore, localStore, encoder, decoder, taskpool)
     let manifest = !await storeDataGetManifest(localStore, chunker)
     let protected = !await erasure.encode(manifest, 3, 2)
-    let builder = !Poseidon2Builder.new(networkStore, localStore, protected)
+    let builder = !Poseidon2Builder.new(networkStore, localStore, erasure, protected)
     verifiable = !await builder.buildManifest(taskpool)
     let cid = (!await localStore.storeManifest(verifiable)).cid
     file.close()
