@@ -47,8 +47,6 @@ type Manifest* = ref object of RootObj
     case verifiable {.serialize.}: bool
     # Verifiable datasets can be used to generate storage proofs
     of true:
-      innerK: uint32 # inner cell code data shards (K)
-      innerN: uint32 # inner cell code total shards (N)
       verifyRoot: Cid # Root of the top level merkle tree built from slot roots
       slotRoots: seq[Cid] # Individual slot root built from the original dataset blocks
       cellSize: NBytes # Size of each slot cell
@@ -62,9 +60,8 @@ type Manifest* = ref object of RootObj
     discard
 
 const ManifestVersionV1* = 1'u32 # v1.0.0: locks cidVersion = CIDv1, parity packing
-const DefaultInnerK* = 1'u32 # inner cell code data shards (K); rate 1/2 = (1, 2)
-const DefaultInnerN* = 2'u32 # inner cell code total shards (N)
-  # inner cell-code parity shards per data shard (1 = rate 1/2)
+const InnerCodeK* = 1'u32 # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
+const InnerCodeN* = 2'u32 # inner cell-code total shards N (> K)
 
 ############################################################
 # Accessors
@@ -82,15 +79,17 @@ func version*(self: Manifest): uint32 =
 func cidVersion*(self: Manifest): CidVersion =
   self.cidVersion
 
-func innerK*(self: Manifest): uint32 =
-  self.innerK
+func innerK*(self: Manifest): int =
+  ## Inner code K for this manifest's layout version (protocol constant, never stored)
+  case self.version
+  of ManifestVersionV1: InnerCodeK.int
+  else: 0
 
-func innerN*(self: Manifest): uint32 =
-  self.innerN
-
-func innerParityFactor*(self: Manifest): int =
-  # parity shards per data shard: (N-K)/K must divide exactly (1/2 -> 1)
-  (self.innerN.int - self.innerK.int) div self.innerK.int
+func innerN*(self: Manifest): int =
+  ## Inner code N for this manifest's layout version (protocol constant, never stored)
+  case self.version
+  of ManifestVersionV1: InnerCodeN.int
+  else: 0
 
 func hcodec*(self: Manifest): MultiCodec =
   self.hcodec
@@ -182,14 +181,42 @@ func numPadSlotBlocks*(self: Manifest): int =
 func numSlotBlocksTotal*(self: Manifest): int =
   self.dataBlocksPerSlot + self.numPadSlotBlocks
 
+func rowShards*(self: Manifest, numBlockCells: int): int =
+  ## Shards per row after pass 1: n_row = C*N/K (requires K | C*N, checked in verify)
+  numBlockCells * self.innerN div self.innerK
+
+func rowShards*(self: Manifest): int =
+  self.rowShards(self.numBlockCells)
+
+func colShards*(self: Manifest, numBlockCells, slotBlocksTotal: int): int =
+  ## Shards per column after pass 2: n_col = T*N/K (requires K | T*N)
+  slotBlocksTotal * self.innerN div self.innerK
+
+func colShards*(self: Manifest): int =
+  self.colShards(self.numBlockCells, self.numSlotBlocksTotal)
+
+func firstPassParityBlocks*(self: Manifest, numBlockCells, slotBlocksTotal: int): int =
+  divUp(slotBlocksTotal * (self.rowShards(numBlockCells) - numBlockCells), numBlockCells)
+
 func firstPassParityBlocks*(self: Manifest): int =
-  self.numSlotBlocksTotal * self.innerParityFactor
+  self.firstPassParityBlocks(self.numBlockCells, self.numSlotBlocksTotal)
+
+func secondPassParityBlocks*(self: Manifest, numBlockCells, slotBlocksTotal: int): int =
+  ## Pass 2 runs over all n_row columns of the extended grid, each gaining
+  ## n_col - T parity shards
+  let nRow = self.rowShards(numBlockCells)
+  let nCol = self.colShards(numBlockCells, slotBlocksTotal)
+  divUp(nRow * (nCol - slotBlocksTotal), numBlockCells)
 
 func secondPassParityBlocks*(self: Manifest): int =
-  (1 + self.innerParityFactor) * self.numSlotBlocksTotal * self.innerParityFactor
+  self.secondPassParityBlocks(self.numBlockCells, self.numSlotBlocksTotal)
+
+func parityBlocksPerSlot*(self: Manifest, numBlockCells, slotBlocksTotal: int): int =
+  self.firstPassParityBlocks(numBlockCells, slotBlocksTotal) +
+    self.secondPassParityBlocks(numBlockCells, slotBlocksTotal)
 
 func parityBlocksPerSlot*(self: Manifest): int =
-  self.firstPassParityBlocks + self.secondPassParityBlocks
+  self.parityBlocksPerSlot(self.numBlockCells, self.numSlotBlocksTotal)
 
 func filename*(self: Manifest): ?string =
   self.filename
@@ -260,8 +287,10 @@ func verify*(self: Manifest): ?!void =
   ## Check manifest correctness
   ##
 
-  if self.innerK == 0 or (
-    (self.innerN.int - self.innerK.int) mod self.innerK.int != 0
+  if self.protected and self.verifiable and (
+    self.innerK == 0 or self.innerN <= self.innerK or
+    (self.numBlockCells * self.innerN) mod self.innerK != 0 or
+    (self.numSlotBlocksTotal * self.innerN) mod self.innerK != 0
   ):
     return
       failure newException(ArchivistError, "Broken manifest: inner code rate not supported")
@@ -277,7 +306,7 @@ func verify*(self: Manifest): ?!void =
 func `==`*(a, b: Manifest): bool =
   (a.treeCid == b.treeCid) and (a.datasetSize == b.datasetSize) and
     (a.blockSize == b.blockSize) and (a.version == b.version) and
-    (a.cidVersion == b.cidVersion) and (a.innerK == b.innerK) and (a.innerN == b.innerN) and
+    (a.cidVersion == b.cidVersion) and
     (a.hcodec == b.hcodec) and (a.codec == b.codec) and (a.protected == b.protected) and
     (a.filename == b.filename) and (a.mimetype == b.mimetype) and (
     if a.protected:
@@ -302,8 +331,8 @@ func `$`*(self: Manifest): string =
   result =
     "treeCid: " & $self.treeCid & ", datasetSize: " & $self.datasetSize & ", blockSize: " &
     $self.blockSize & ", version: " & $self.version & ", cidVersion: " & $self.cidVersion &
-    ", innerK: " & $self.innerK & ", innerN: " & $self.innerN & ", hcodec: " & $self.hcodec & ", codec: " &
-    $self.codec & ", protected: " & $self.protected
+    ", hcodec: " & $self.hcodec & ", codec: " & $self.codec & ", protected: " &
+    $self.protected
 
   if self.filename.isSome:
     result &= ", filename: " & $self.filename
@@ -340,8 +369,6 @@ func new*(
     datasetSize: NBytes,
     version: uint32 = ManifestVersionV1,
     cidVersion: CidVersion = CIDv1,
-    innerK: uint32 = DefaultInnerK,
-    innerN: uint32 = DefaultInnerN,
     hcodec = Sha256HashCodec,
     codec = BlockCodec,
     protected = false,
@@ -354,8 +381,6 @@ func new*(
     datasetSize: datasetSize,
     version: version,
     cidVersion: cidVersion,
-    innerK: innerK,
-    innerN: innerN,
     codec: codec,
     hcodec: hcodec,
     protected: protected,
@@ -380,8 +405,6 @@ func new*(
     datasetSize: datasetSize,
     version: manifest.version,
     cidVersion: manifest.cidVersion,
-    innerK: manifest.innerK,
-    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -405,8 +428,6 @@ func new*(T: type Manifest, manifest: Manifest): Manifest =
     datasetSize: manifest.originalDatasetSize,
     version: manifest.version,
     cidVersion: manifest.cidVersion,
-    innerK: manifest.innerK,
-    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -422,8 +443,6 @@ func new*(
     blockSize: NBytes,
     version: uint32 = ManifestVersionV1,
     cidVersion: CidVersion = CIDv1,
-    innerK: uint32 = DefaultInnerK,
-    innerN: uint32 = DefaultInnerN,
     hcodec: MultiCodec,
     codec: MultiCodec,
     ecK: int,
@@ -440,8 +459,6 @@ func new*(
     blockSize: blockSize,
     version: version,
     cidVersion: cidVersion,
-    innerK: innerK,
-    innerN: innerN,
     hcodec: hcodec,
     codec: codec,
     protected: true,
@@ -481,8 +498,6 @@ func new*(
     datasetSize: datasetSize,
     version: manifest.version,
     cidVersion: manifest.cidVersion,
-    innerK: manifest.innerK,
-    innerN: manifest.innerN,
     codec: manifest.codec,
     hcodec: manifest.hcodec,
     blockSize: manifest.blockSize,
@@ -519,12 +534,11 @@ func protectedView*(self: Manifest): ?!Manifest =
     datasetSize: self.protectedDatasetSize,
     version: self.version,
     cidVersion: self.cidVersion,
-    innerK: self.innerK,
-    innerN: self.innerN,
     codec: self.codec,
     hcodec: self.hcodec,
     blockSize: self.blockSize,
     protected: true,
+    verifiable: false,
     ecK: self.ecK,
     ecM: self.ecM,
     originalTreeCid: self.originalTreeCid,

@@ -208,8 +208,8 @@ suite "Manifest - Attribute Inheritance":
     check:
       decoded.version == ManifestVersionV1
       decoded.cidVersion == protected.cidVersion
-      decoded.innerK == protected.innerK
-      decoded.innerN == protected.innerN
+      decoded.innerK == 1 # layout-version constant (bring-up rate 1:2)
+      decoded.innerN == 2
       decoded.protectedTreeCid == protected.treeCid
       decoded.protectedDatasetSize == protected.datasetSize
 
@@ -267,17 +267,24 @@ suite "Manifest - Attribute Inheritance":
     check broken.verify().isErr
     check broken.verify().error.msg == "Broken manifest: wrong originalBlocksCount"
 
-  test "Verify rejects non-exact inner code rates":
-    let bad = Manifest.new(
-      treeCid = Cid.example,
-      blockSize = 1.MiBs,
-      datasetSize = 10.MiBs,
-      innerK = 2,
-      innerN = 3, # N-K = 1 not divisible by K = 2
-    )
+  test "Inner geometry derives from the layout version constant":
+    let verifiable = Manifest
+      .new(
+        manifest = makeProtectedManifest(SteppedStrategy),
+        treeCid = Cid.example,
+        datasetSize = 10.MiBs,
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
     check:
-      bad.verify().isErr
-      bad.verify().error.msg == "Broken manifest: inner code rate not supported"
+      verifiable.innerK == 1
+      verifiable.innerN == 2
+      verifiable.rowShards == verifiable.numBlockCells * 2
+      verifiable.colShards == verifiable.numSlotBlocksTotal * 2
+      verifiable.firstPassParityBlocks == verifiable.numSlotBlocksTotal
+      verifiable.parityBlocksPerSlot == 3 * verifiable.numSlotBlocksTotal
 
   test "Protected view exposes the protected root for repair addressing":
     let
