@@ -12,6 +12,7 @@ import pkg/threading/smartptrs
 
 import pkg/promethei/slots {.all.}
 import pkg/promethei/slots/types {.all.}
+import pkg/promethei/erasure
 import pkg/promethei/merkletree
 import pkg/promethei/merkletree/poseidon2
 import pkg/promethei/prometheitypes
@@ -96,7 +97,12 @@ suite "Test NimGoth16 Backend":
       store, numDatasetBlocks, ecK, ecM, blockSize, cellSize, tp
     )
 
-    builder = Poseidon2Builder.new(store, store, verifiable).tryGet
+    builder = Poseidon2Builder.new(
+      store,
+      store,
+      Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, tp),
+      verifiable,
+    ).tryGet
     sampler = Poseidon2Sampler.new(slotId, store, builder).tryGet
 
     nimGroth16 = NimGroth16BackendRef.new(graph, r1cs, zkey, tp = Taskpool.new()).tryGet

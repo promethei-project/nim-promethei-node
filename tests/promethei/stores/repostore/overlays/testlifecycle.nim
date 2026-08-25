@@ -820,7 +820,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
 
       var bits = BitSeq.init(blocks.len)
       for i in 0 ..< blocks.len:
@@ -872,7 +877,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
 
       var bits = BitSeq.init(blocks.len)
       for i in 0 ..< blocks.len:
@@ -935,7 +945,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
 
       var bits = BitSeq.init(blocks.len)
       for i in 0 ..< blocks.len:
@@ -1006,7 +1021,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
 
       # Store verifiable manifest - should create 4 slot overlays with refCount=4
       let verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
@@ -1048,7 +1068,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
       let verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
 
       check (await repo.blockRefCount(verManifestBlk.cid)).tryGet() == 4.Natural
@@ -1088,7 +1113,12 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = Manifest.new(protManifest, Cid.example, slotRoots).tryGet()
+      let verManifest = Manifest
+        .new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
+        .tryGet()
 
       # Store with slotIdx=1 - only slot 1 overlay should be created
       let verManifestBlk = (
@@ -1182,7 +1212,11 @@ proc testLifecycle*(
       for _ in 0 ..< 4:
         slotRoots.add(Cid.example)
 
-      let verManifest = !Manifest.new(protManifest, Cid.example, slotRoots)
+      let verManifest =
+        !Manifest.new(
+          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          slotRoots,
+        )
       let newExpiry = now + 2000
 
       # Store verifiable manifest first (without explicit expiry)
@@ -1228,7 +1262,11 @@ proc testLifecycle*(
         slotRoots.add(Cid.example)
 
       let
-        verManifest = !Manifest.new(protManifest, Cid.example, slotRoots)
+        verManifest =
+          !Manifest.new(
+            protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+            slotRoots,
+          )
         newExpiry = now + 3000
 
       let futures =

@@ -10,6 +10,7 @@ import pkg/taskpools
 
 import pkg/promethei/slots {.all.}
 import pkg/promethei/slots/types {.all.}
+import pkg/promethei/erasure
 import pkg/promethei/merkletree
 import pkg/promethei/prometheitypes
 import pkg/promethei/manifest
@@ -88,7 +89,12 @@ suite "Test Circom Compat Backend":
       store, numDatasetBlocks, ecK, ecM, blockSize, cellSize, tp
     )
 
-    builder = Poseidon2Builder.new(store, store, verifiable).tryGet
+    builder = Poseidon2Builder.new(
+      store,
+      store,
+      Erasure.new(store, store, leoEncoderProvider, leoDecoderProvider, tp),
+      verifiable,
+    ).tryGet
     sampler = Poseidon2Sampler.new(slotId, store, builder).tryGet
 
     circom = CircomCompatBackendRef.new(r1cs, wasm, zkey).tryGet

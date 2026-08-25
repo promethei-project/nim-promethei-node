@@ -1,5 +1,7 @@
 import pkg/chronos
 import pkg/questionable/results
+import pkg/libp2p/protobuf/minprotobuf
+import std/sequtils
 import pkg/promethei/chunker
 import pkg/promethei/blocktype as bt
 import pkg/promethei/manifest
@@ -12,6 +14,10 @@ import pkg/promethei/indexingstrategy
 import ../asynctest
 import ./helpers
 import ./examples
+
+proc encodeDecode(manifest: Manifest): Manifest =
+  let e = manifest.encode().tryGet()
+  Manifest.decode(e).tryGet()
 
 suite "Manifest":
   let
@@ -38,13 +44,13 @@ suite "Manifest":
 
     verifiableManifest = Manifest
       .new(
-        manifest = protectedManifest, verifyRoot = verifyCid, slotRoots = slotLeavesCids
+        manifest = protectedManifest,
+        treeCid = protectedManifest.treeCid,
+        datasetSize = protectedManifest.datasetSize,
+        verifyRoot = verifyCid,
+        slotRoots = slotLeavesCids,
       )
       .tryGet()
-
-  proc encodeDecode(manifest: Manifest): Manifest =
-    let e = manifest.encode().tryGet()
-    Manifest.decode(e).tryGet()
 
   test "Should encode/decode to/from base manifest":
     check:
@@ -89,6 +95,8 @@ suite "Manifest - Attribute Inheritance":
     var verifiable = Manifest
       .new(
         manifest = makeProtectedManifest(SteppedStrategy),
+        treeCid = Cid.example,
+        datasetSize = 10.MiBs,
         verifyRoot = Cid.example,
         slotRoots = @[Cid.example, Cid.example],
       )
@@ -99,6 +107,8 @@ suite "Manifest - Attribute Inheritance":
     verifiable = Manifest
       .new(
         manifest = makeProtectedManifest(LinearStrategy),
+        treeCid = Cid.example,
+        datasetSize = 10.MiBs,
         verifyRoot = Cid.example,
         slotRoots = @[Cid.example, Cid.example],
       )
@@ -110,6 +120,8 @@ suite "Manifest - Attribute Inheritance":
     var verifiable = Manifest
       .new(
         manifest = makeProtectedManifest(SteppedStrategy),
+        treeCid = Cid.example,
+        datasetSize = 10.MiBs,
         verifyRoot = Cid.example,
         slotRoots = @[Cid.example, Cid.example],
       )
@@ -121,27 +133,168 @@ suite "Manifest - Attribute Inheritance":
     check !verifiable.mimetype == "image/png"
 
   test "Can provide slot block iterator for verifiable manifest":
-    var verifiable = Manifest
+    let verifiable = Manifest
       .new(
         manifest = makeProtectedManifest(SteppedStrategy),
+        treeCid = Cid.example,
+        datasetSize = 10.MiBs,
         verifyRoot = Cid.example,
         slotRoots = @[Cid.example, Cid.example],
       )
       .tryGet()
 
-    let iter0 = verifiable.getSlotBlockIterator(0).tryGet()
-    let iter1 = verifiable.getSlotBlockIterator(1).tryGet()
-    check:
-      iter0.next() == 0
-      iter0.next() == 1
-      iter0.next() == 2
-      iter0.next() == 3
-      iter0.next() == 4
-      iter0.finished
+    let
+      dataPerSlot = verifiable.dataBlocksPerSlot
+      parityPerSlot = verifiable.parityBlocksPerSlot
+      protectedCount = verifiable.protectedBlocksCount
 
-      iter1.next() == 5
-      iter1.next() == 6
-      iter1.next() == 7
-      iter1.next() == 8
-      iter1.next() == 9
-      iter1.finished
+    check:
+      dataPerSlot == 5
+      parityPerSlot == 3 * (dataPerSlot + verifiable.numPadSlotBlocks)
+
+    for slot in 0 ..< verifiable.numSlots:
+      let iter = verifiable.getSlotIterator(slot).tryGet()
+      var seen: seq[int]
+      while not iter.finished:
+        seen.add(iter.next())
+
+      let
+        dataPart = seen[0 ..< dataPerSlot]
+        parityPart = seen[dataPerSlot .. ^1]
+      check:
+        dataPart.len == dataPerSlot
+        dataPart.allIt(it < protectedCount)
+        parityPart.len == parityPerSlot
+        parityPart ==
+          toSeq(
+            protectedCount + slot * parityPerSlot ..<
+              protectedCount + (slot + 1) * parityPerSlot
+          )
+
+  test "Slot iterator requires a verifiable manifest":
+    let unprotected =
+      Manifest.new(treeCid = Cid.example, blockSize = 1.MiBs, datasetSize = 10.MiBs)
+    check:
+      unprotected.getSlotIterator(0).isErr
+      unprotected.getSlotIterator(0).error.msg == "Manifest is not protected"
+      unprotected.getOriginalIterator().isErr
+      unprotected.getOriginalIterator().error.msg == "Manifest is not protected"
+
+    let protectedOnly = makeProtectedManifest(SteppedStrategy)
+    check:
+      protectedOnly.getSlotIterator(0).isErr
+      protectedOnly.getSlotIterator(0).error.msg == "Manifest is not verifiable"
+
+    # protected manifests expose the original data partition
+    let orig = protectedOnly.getOriginalIterator().tryGet()
+    var origSeen: seq[int]
+    while not orig.finished:
+      origSeen.add(orig.next())
+    check origSeen == @[0, 1, 2, 3, 4]
+
+  test "Verifiable manifest round-trip preserves version and protected view":
+    let
+      protected = makeProtectedManifest(SteppedStrategy)
+      verifiable = Manifest
+        .new(
+          manifest = protected,
+          treeCid = protected.treeCid,
+          datasetSize = protected.datasetSize,
+          verifyRoot = Cid.example,
+          slotRoots = @[Cid.example, Cid.example],
+        )
+        .tryGet()
+      decoded = encodeDecode(verifiable)
+    check:
+      decoded.version == ManifestVersionV1
+      decoded.cidVersion == protected.cidVersion
+      decoded.innerK == protected.innerK
+      decoded.innerN == protected.innerN
+      decoded.protectedTreeCid == protected.treeCid
+      decoded.protectedDatasetSize == protected.datasetSize
+
+  test "Reject unsupported manifest version on decode":
+    var header = initProtoBuffer()
+    header.write(1, Cid.example.data.buffer)
+    header.write(2, 1.MiBs.uint32)
+    header.write(3, 100.MiBs.uint64)
+    header.write(4, BlockCodec.uint32)
+    header.write(5, Sha256HashCodec.uint32)
+    header.write(6, 2'u32) # unsupported version
+    header.finish()
+    var pbNode = initProtoBuffer()
+    pbNode.write(1, header)
+    pbNode.finish()
+
+    let decoded = Manifest.decode(pbNode.buffer)
+    check decoded.isErr
+    check decoded.error.msg == "Unsupported manifest version"
+
+  test "Verify uses the protected blocks count for verifiable manifests":
+    # top-level datasetSize is the physical (enlarged) size; verify must
+    # check the protected partition, not the top-level blocksCount
+    let physical = Manifest
+      .new(
+        manifest = makeProtectedManifest(SteppedStrategy), # 10 protected blocks
+        treeCid = Cid.example,
+        datasetSize = 12.MiBs, # enlarged physical dataset
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    check physical.verify().isOk
+
+    let broken = Manifest
+      .new(
+        manifest = Manifest.new(
+          manifest = Manifest.new(
+            treeCid = Cid.example, blockSize = 1.MiBs, datasetSize = 11.MiBs
+          ),
+          treeCid = Cid.example,
+          datasetSize = 11.MiBs, # 11 blocks != steps*(ecK+ecM) = 22
+          ecK = 1,
+          ecM = 1,
+          strategy = SteppedStrategy,
+        ),
+        treeCid = Cid.example,
+        datasetSize = 11.MiBs,
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    check broken.verify().isErr
+    check broken.verify().error.msg == "Broken manifest: wrong originalBlocksCount"
+
+  test "Verify rejects non-exact inner code rates":
+    let bad = Manifest.new(
+      treeCid = Cid.example,
+      blockSize = 1.MiBs,
+      datasetSize = 10.MiBs,
+      innerK = 2,
+      innerN = 3, # N-K = 1 not divisible by K = 2
+    )
+    check:
+      bad.verify().isErr
+      bad.verify().error.msg == "Broken manifest: inner code rate not supported"
+
+  test "Protected view exposes the protected root for repair addressing":
+    let
+      protected = makeProtectedManifest(SteppedStrategy)
+      verifiable = Manifest
+        .new(
+          manifest = protected,
+          treeCid = protected.treeCid,
+          datasetSize = protected.datasetSize,
+          verifyRoot = Cid.example,
+          slotRoots = @[Cid.example, Cid.example],
+        )
+        .tryGet()
+      view = verifiable.protectedView().tryGet()
+    check:
+      view.protected
+      not view.verifiable
+      view.treeCid == protected.treeCid
+      view.datasetSize == protected.datasetSize
+      makeProtectedManifest(SteppedStrategy).protectedView().isErr
