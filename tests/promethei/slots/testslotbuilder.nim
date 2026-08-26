@@ -83,9 +83,7 @@ suite "Slot builder":
     parityPerSlot = 3 * numSlotBlocksTotal
 
     # Pads are all-1s bytes (explicit fill: no zero-init under -d:danger)
-    emptyDigest = SpongeMerkle.digest(
-      newSeqWith(blockSize.int, 0xFF'u8), cellSize.int
-    )
+    emptyDigest = SpongeMerkle.digest(newSeqWith(blockSize.int, 0xFF'u8), cellSize.int)
 
   var
     datasetBlocks: seq[bt.Block]
@@ -425,9 +423,7 @@ suite "Cell-aware slot building":
     numPadSlotBlocks = (pow2SlotCells div numBlockCells) - numSlotBlocks
     parityPerSlot = 3 * (numSlotBlocks + numPadSlotBlocks)
 
-    emptyDigest = SpongeMerkle.digest(
-      newSeqWith(blockSize.int, 0xFF'u8), cellSize.int
-    )
+    emptyDigest = SpongeMerkle.digest(newSeqWith(blockSize.int, 0xFF'u8), cellSize.int)
 
   var
     datasetBlocks: seq[bt.Block]

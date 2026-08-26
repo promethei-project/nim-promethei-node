@@ -40,12 +40,14 @@ method encode*(
   var encoder =
     if self.encoder.isNone:
       withLock leoCoderInitLock:
-        self.encoder = (?LeoEncoder.init(self.blockSize, self.buffers, self.parity)).some
+        self.encoder =
+          (?LeoEncoder.init(self.blockSize, self.buffers, self.parity)).some
       self.encoder.get()
     else:
       self.encoder.get()
 
   encoder.encode(data, parity)
+
 method decode*(
     self: LeoDecoderBackend, data, parity, recovered: var seq[seq[byte]]
 ): Result[void, cstring] =
@@ -54,15 +56,16 @@ method decode*(
   var decoder =
     if self.decoder.isNone:
       withLock leoCoderInitLock:
-        self.decoder = (?LeoDecoder.init(self.blockSize, self.buffers, self.parity)).some
+        self.decoder =
+          (?LeoDecoder.init(self.blockSize, self.buffers, self.parity)).some
       self.decoder.get()
     else:
       self.decoder.get()
 
   decoder.decode(data, parity, recovered)
+
 method release*(self: LeoEncoderBackend) =
-  if self.encoder.isSome:
-    self.encoder.get().free()
+  self.encoder.get().free()
 
 method release*(self: LeoDecoderBackend) =
   if self.decoder.isSome:

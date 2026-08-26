@@ -344,7 +344,11 @@ proc streamEntireDataset(
 
         # A verifiable dataset's shards are served under the verifiable
         # root; the protected view only supplies the outer-EC geometry.
-        let fetchRoot = if manifest.verifiable: some(manifest.treeCid) else: Cid.none
+        let fetchRoot =
+          if manifest.verifiable:
+            some(manifest.treeCid)
+          else:
+            Cid.none
         if err =? (await erasure.decode(decodeTarget, fetchRoot)).errorOption:
           error "Unable to erasure decode manifest", manifestCid, exc = err.msg
           return
