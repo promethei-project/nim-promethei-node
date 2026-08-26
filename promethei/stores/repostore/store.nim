@@ -145,10 +145,16 @@ proc getBlocksAndProofsImpl(
           nonEmptyIndices.add((?catch(parseInt(record.key.value))).Natural)
 
       if nonEmptyIndices.len > 0:
-        let proofs =
-          ?await self.getTreeProofs(treeCid, nonEmptyIndices, nleaves, mcodec)
-        for (index, proof) in proofs:
-          generatedProofs[index] = proof
+        # Proof generation needs the flat tree nodes locally; when they are
+        # unavailable (e.g. the dataset builder is gone), degrade to the
+        # stored proofs instead of failing the whole lookup.
+        let proofs = await self.getTreeProofs(treeCid, nonEmptyIndices, nleaves, mcodec)
+        if proofs.isOk:
+          for (index, proof) in proofs.get:
+            generatedProofs[index] = proof
+        else:
+          warn "Proof generation failed, falling back to stored proofs",
+            treeCid, err = proofs.error.msg
 
   # Collect block data keys from leaf records.
   # leafRecords may be a subset of leafKeys (missing silently skipped).

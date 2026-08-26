@@ -150,9 +150,8 @@ func numSlotCells*[SomeTree, SomeHash](
   ##
 
   self.numBlockCells * (
-    self.numSlotBlocks + self.manifest.parityBlocksPerSlot(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    )
+    self.numSlotBlocks +
+    self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
   )
 
 func slotIndicesIter*[SomeTree, SomeHash](
@@ -233,9 +232,8 @@ proc buildVerifiableLeafCids*[SomeTree, SomeHash](
 
   let
     protectedCount = self.manifest.protectedBlocksCount
-    parityPerSlot = self.manifest.parityBlocksPerSlot(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    )
+    parityPerSlot =
+      self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
   var leafCids = newSeq[Cid](protectedCount + self.manifest.numSlots * parityPerSlot)
   for idx in 0 ..< protectedCount:
     leafCids[idx] = ?await self.getStoredCid(self.manifest.treeCid, idx.Natural)
@@ -309,10 +307,11 @@ proc getSlotLeafBlock*[SomeTree, SomeHash](
       parityPerSlot = self.manifest.parityBlocksPerSlot(
         self.numBlockCells.int, self.numSlotBlocks.int
       )
-      blk = ?await self.networkStore.getBlock(
-        parityRoot,
-        protectedCount + slotIndex * parityPerSlot + (slotPos - self.numSlotBlocks),
-      )
+      blk =
+        ?await self.networkStore.getBlock(
+          parityRoot,
+          protectedCount + slotIndex * parityPerSlot + (slotPos - self.numSlotBlocks),
+        )
     if blk.isEmpty:
       return failure "Empty parity block"
     let tree = ?SomeTree.digestTree(blk.data, self.cellSize.int)
@@ -337,16 +336,14 @@ proc buildSlotTree*[SomeTree, SomeHash](
 
   let
     dataLeaves = self.numSlotBlocks
-    parityLeaves = self.manifest.parityBlocksPerSlot(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    )
+    parityLeaves =
+      self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
 
   proc digestAt(pos: int): Future[SomeHash] {.async.} =
     ## Root of the block digest tree at slot leaf position `pos`; raises on
     ## fetch or build failure (the async tree builder surfaces it as a failed leaf).
-    let (_, tree) = (
-      await self.getSlotLeafBlock(slotIndex, dataRoot, parityRoot, pos.Natural)
-    ).tryGet
+    let (_, tree) =
+      (await self.getSlotLeafBlock(slotIndex, dataRoot, parityRoot, pos.Natural)).tryGet
     return tree.root.tryGet
 
   let
@@ -384,9 +381,8 @@ proc sealSlot*[SomeTree, SomeHash](
   let
     indices = toSeq(?catch(self.strategy.getIndices(slotIndex)))
     dataLeaves = indices.len
-    parityLeaves = self.manifest.parityBlocksPerSlot(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    )
+    parityLeaves =
+      self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
     protectedCount = self.manifest.protectedBlocksCount
 
   trace "Storing slot tree", treeCid, slotIndex, leaves = tree.leavesCount
@@ -437,7 +433,7 @@ proc packParityCells(
     blockBytes = cellsPerBlock * cellSize
     count = divUp(cells.len, blockBytes)
   for i in 0 ..< count:
-    var blk = newSeq[byte](blockBytes) # zero-initialized tail padding
+    var blk = newSeqWith(blockBytes, 0'u8) # explicit: newSeq does not zero under -d:danger
     let
       start = i * blockBytes
       len = min(blockBytes, cells.len - start)
@@ -454,9 +450,8 @@ proc encodeSlot*[SomeTree, SomeHash](
   ## `targetRoot` (the CURRENT overlay). Returns the slot's parity CIDs in
   ## position order [pass1 ++ pass2].
   ##
-  ## The inner cell code runs at the layout version's rate K:N (a protocol
-  ## constant - never stored, never hardcoded here). All geometry derives
-  ## from the manifest accessors:
+  ## The inner cell code runs at the layout version's rate K:N. All geometry
+  ## derives from the manifest accessors:
   ##
   ## Pass 1 (row-wise): each block's C cells encode to n_row = C*N/K shards;
   ## the n_row - C parity cells per row are concatenated across rows and
@@ -479,13 +474,11 @@ proc encodeSlot*[SomeTree, SomeHash](
     C = self.numBlockCells.int # cells per block
     T = self.numSlotBlocks.int # data-region leaves incl. pow2 pads
     nRow = self.manifest.rowShards(self.numBlockCells.int) # shards per row after pass 1
-    nCol = self.manifest.colShards(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    ) # shards per column after pass 2
+    nCol = self.manifest.colShards(self.numBlockCells.int, self.numSlotBlocks.int)
+      # shards per column after pass 2
     protectedCount = self.manifest.protectedBlocksCount
-    parityPerSlot = self.manifest.parityBlocksPerSlot(
-      self.numBlockCells.int, self.numSlotBlocks.int
-    )
+    parityPerSlot =
+      self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
     firstPassBlocks = self.manifest.firstPassParityBlocks(
       self.numBlockCells.int, self.numSlotBlocks.int
     )
@@ -497,7 +490,10 @@ proc encodeSlot*[SomeTree, SomeHash](
     blocks[i] =
       if idx < protectedCount:
         let blk = ?await self.networkStore.getBlock(self.manifest.treeCid, idx)
-        blk.data
+        if blk.isEmpty:
+          self.emptyBlock # erasure pad leaf: zero-fill, never fetched over the wire
+        else:
+          blk.data
       else:
         self.emptyBlock
 
@@ -548,6 +544,7 @@ proc encodeSlot*[SomeTree, SomeHash](
         PrometheiProof.none,
       )
     )
+
   for i, data in pass2Blocks:
     let blk = ?bt.Block.new(data)
     parityCids.add(blk.cid)
@@ -680,9 +677,8 @@ proc buildManifest*[SomeTree, SomeHash](
   let verifiableSize = (
     self.manifest.blockSize.int * (
       self.manifest.protectedBlocksCount +
-      self.manifest.numSlots * self.manifest.parityBlocksPerSlot(
-        self.numBlockCells.int, self.numSlotBlocks.int
-      )
+      self.manifest.numSlots *
+      self.manifest.parityBlocksPerSlot(self.numBlockCells.int, self.numSlotBlocks.int)
     )
   ).NBytes
 
@@ -740,7 +736,7 @@ proc new*[SomeTree, SomeHash](
 
     numBlocksTotal = numSlotBlocksTotal * manifest.numSlots # number of blocks per slot
 
-    emptyBlock = newSeq[byte](manifest.blockSize.int)
+    emptyBlock = newSeqWith(manifest.blockSize.int, 0xFF'u8)
     emptyDigestTree = ?SomeTree.digestTree(emptyBlock, cellSize.int)
 
     strategy =

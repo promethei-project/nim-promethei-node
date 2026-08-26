@@ -263,6 +263,23 @@ proc prepareDecodingData(
       step = step
       empty = blk.isEmpty
 
+    # Guard the slot indices before any write: an out-of-range position
+    # must fail the decode, not corrupt the heap (no bounds checks under
+    # -d:danger).
+    if pos < 0 or pos >= params.ecK + params.ecM:
+      error "Decoded block position out of range",
+        pos, idx, step, ecK = params.ecK, ecM = params.ecM,
+        rounded = params.rounded, steps = params.steps
+      return failure("Decoded block position out of range")
+    if idx < params.rounded and pos >= params.ecK:
+      error "Data block position exceeds ecK", pos, idx, step
+      return failure("Data block position exceeds ecK")
+    if idx >= params.rounded and pos < params.ecK:
+      error "Parity block position below ecK", pos, idx, step
+      return failure("Parity block position below ecK")
+    if idx < 0 or idx >= cids[].len:
+      error "Block index out of range", idx, cidsLen = cids[].len
+      return failure("Block index out of range")
     cids[idx] = blk.cid
     if idx >= params.rounded:
       trace "Retrieved parity block"
@@ -324,7 +341,6 @@ proc initFromEncoded*(
     blocksCount: encoded.originalBlocksCount,
     encodedBlocksCount: encoded.blocksCount,
     strategy: encoded.protectedStrategy,
-    emptyCid: emptyCid,
   )
 
 proc leopardEncodeTask*(
@@ -402,17 +418,16 @@ proc encodeData(
   trace "Starting erasure coding dataset"
   var
     cids = seq[Cid].new()
-    emptyBlock = newSeq[byte](params.blockSize.int)
+    emptyBlock = newSeqWith(params.blockSize.int, 0xFF'u8)
 
   cids[].setLen(params.encodedBlocksCount)
   for step in 0 ..< params.steps:
     # TODO: Don't allocate a new seq every time, allocate once and zero out
     var
-      data: seq[seq[byte]] # number of blocks to encode
-      parity: seq[seq[byte]]
-
-    data.setLen(params.ecK)
-    parity = newSeqWith(params.ecM, newSeqWith(params.blockSize.int, 0'u8))
+      # Fresh payload: setLen on an uninitialized seq leaves the grown
+      # slots' headers uninitialized under -d:danger.
+      data = newSeq[seq[byte]](params.ecK)
+      parity = newSeqWith(params.ecM, newSeqWith(params.blockSize.int, 0'u8))
 
     let (resolved, filledData) =
       ?await self.prepareEncodingData(
@@ -564,6 +579,76 @@ proc leopardDecodeTask*(
   else:
     ctx[].result = ThreadSpawnRes[seq[seq[byte]]].ok(move recovered)
 
+proc decodeStripes*(
+    self: Erasure,
+    data: sink seq[seq[byte]], # k shards; MISSING shards are empty seqs
+    parity: sink seq[seq[byte]], # m parity shards; missing shards are empty seqs
+): Future[?!seq[seq[byte]]] {.async: (raises: [CancelledError]).} =
+  ## Decode one stripe: given the k data shards (missing shards passed as
+  ## empty seqs) and any of the m parity shards (missing also empty), return
+  ## all k data shards. At least k shards must be present. No storage, no
+  ## CIDs, no source root.
+  ##
+  if data.len == 0:
+    return failure "No shards to decode"
+
+  var
+    shardLen = 0
+    pieces = 0
+  for shard in data:
+    if shard.len > 0:
+      if shardLen == 0:
+        shardLen = shard.len
+      elif shard.len != shardLen:
+        return failure "Mismatched shard lengths in decodeStripes"
+      inc pieces
+  for shard in parity:
+    if shard.len > 0:
+      if shardLen == 0:
+        shardLen = shard.len
+      elif shard.len != shardLen:
+        return failure "Mismatched shard lengths in decodeStripes"
+      inc pieces
+
+  if shardLen == 0:
+    return failure "No shards to decode"
+  if pieces < data.len:
+    return failure "Insufficient shards for decoding"
+
+  var missing = false
+  for shard in data:
+    if shard.len == 0:
+      missing = true
+
+  if not missing:
+    return success data # nothing to recover
+
+  var
+    d = data
+    p = parity
+    recovered: seq[seq[byte]]
+
+  # Decode on the taskpool: the recovered data shards return through the
+  # spawnJoin result channel, no GC refs cross the boundary.
+  try:
+    recovered =
+      ?await spawnJoin(
+        proc(ctx: SharedPtr[TaskCtx[seq[seq[byte]]]]) {.gcsafe, raises: [].} =
+          self.taskPool.spawn leopardDecodeTask(
+            ctx, addr self, shardLen, addr d, addr p
+          )
+      )
+  except SpawnContractError as e:
+    return failure(e)
+
+  # leopard fills `recovered` only at erasure positions; the present
+  # shards pass through unchanged
+  for i in 0 ..< recovered.len:
+    if d[i].len > 0:
+      recovered[i] = move d[i]
+
+  success recovered
+
 proc decodeInternal(
     self: Erasure, encodedTreeCid: Cid, targetCid: Cid, params: EncodingParams
 ): Future[?!(ref seq[Cid], seq[Natural])] {.async: (raises: [CancelledError]).} =
@@ -577,18 +662,16 @@ proc decodeInternal(
   var
     cids = seq[Cid].new()
     recoveredIndices = newSeq[Natural]()
-    emptyBlock = newSeq[byte](params.blockSize.int)
+    emptyBlock = newSeqWith(params.blockSize.int, 0xFF'u8)
 
   cids[].setLen(params.encodedBlocksCount)
   for step in 0 ..< params.steps:
     var
-      data: seq[seq[byte]]
-      parityData: seq[seq[byte]]
+      # Fresh payloads: setLen on an uninitialized seq leaves the grown
+      # slots' headers uninitialized under -d:danger.
+      data = newSeq[seq[byte]](params.ecK)
+      parityData = newSeq[seq[byte]](params.ecM)
       recovered: seq[seq[byte]]
-
-    data.setLen(params.ecK) # set len to K
-    parityData.setLen(params.ecM) # set len to M
-
     let (dataPieces, parityPieces, filledData, filledParity) =
       ?await self.prepareDecodingData(
         encodedTreeCid, params, step, move data, move parityData, cids, emptyBlock
@@ -643,13 +726,17 @@ proc decodeInternal(
   return (cids, recoveredIndices).success
 
 proc decode*(
-    self: Erasure, encoded: Manifest
+    self: Erasure, encoded: Manifest, fetchFrom = Cid.none
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
   ## Decode a protected manifest into it's original
   ## manifest
   ##
   ## `encoded` - the encoded (protected) manifest to
   ##             be recovered
+  ##
+  ## `fetchFrom` - root to fetch the encoded shards from, when it differs
+  ##             from `encoded.treeCid` (a verifiable dataset's shards are
+  ##             served under the verifiable root).
   ##
 
   logScope:
@@ -661,6 +748,7 @@ proc decode*(
   let
     emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
+    fetchRoot = fetchFrom |? encoded.treeCid
 
   var
     cids: ref seq[Cid]
@@ -672,7 +760,7 @@ proc decode*(
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, recoveredIndices) =
-          ?await self.decodeInternal(encoded.treeCid, encoded.originalTreeCid, params)
+          ?await self.decodeInternal(fetchRoot, encoded.originalTreeCid, params)
         tree =
           # sync build: root comparison only (decode paths do not stream)
           ?PrometheiTree.init(cids[0 ..< encoded.originalBlocksCount])
@@ -697,12 +785,19 @@ proc decode*(
   return decoded.success
 
 proc repair*(
-    self: Erasure, encoded: Manifest
+    self: Erasure, encoded: Manifest, fetchFrom = Cid.none
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ## Repair a protected manifest by reconstructing the full dataset
   ##
   ## `encoded` - the encoded (protected) manifest to
   ##             be repaired
+  ##
+  ## `fetchFrom` - root to fetch the encoded shards from, when it differs
+  ##             from `encoded.treeCid`. A provider repairing a slot of a
+  ##             verifiable dataset can only fetch (and prove) under the
+  ##             verifiable root - the protected tree's blocks are its
+  ##             prefix at identical indices - while reconstruction and
+  ##             re-encoding stay addressed by `encoded`.
   ##
   ## TODO: there are several quirks to be aware of here -
   ## decode can only recreate original blocks, the resulting
@@ -719,12 +814,14 @@ proc repair*(
   logScope:
     treeCid = encoded.treeCid
     originalTreeCid = encoded.originalTreeCid
+    fetchFrom = fetchFrom
 
   trace "Preparing to repair dataset"
 
   let
     emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
+    fetchRoot = fetchFrom |? encoded.treeCid
 
   ?await self.repoStore.withOverlay(
     encoded.originalTreeCid,
@@ -732,7 +829,7 @@ proc repair*(
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, _) =
-          ?await self.decodeInternal(encoded.treeCid, encoded.originalTreeCid, params)
+          ?await self.decodeInternal(fetchRoot, encoded.originalTreeCid, params)
         tree =
           # sync build: root comparison only (decode paths do not stream)
           ?PrometheiTree.init(cids[0 ..< encoded.originalBlocksCount])

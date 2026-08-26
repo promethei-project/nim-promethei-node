@@ -332,6 +332,12 @@ suite "Test Node - Purchase request":
 
   test "Setup purchase request - Protected manifest":
     (await localStore.putBlock(protectedManifestBlock)).tryGet()
+    # The fixture build left a verifiable overlay for this same dataset;
+    # this test re-drives the build from the protected manifest alone, and
+    # the lingering overlay would collide with the builder's tmp-overlay
+    # finalization (same content-addressed root).
+    let fixtureVerifiable = Manifest.decode(verifiableBlock).tryGet()
+    (await localStore.dropOverlay(fixtureVerifiable.treeCid)).tryGet()
 
     let request = (
       await node.setupRequest(
@@ -463,11 +469,14 @@ suite "Test Node - Purchase overlay cleanup":
       )
     ).tryGet()
 
-    # Overlays: original + protected/verifiable + 5 slot overlays = 7
-    check (await overlayCount(localStore)).tryGet() == 7
-    # Erasure coding added blocks, so quota and block count grew
-    check localStore.quotaUsedBytes > quotaBefore
-    check localStore.totalBlocks > blocksBefore
+    # Overlays: original + protected + verifiable + 5 slot overlays = 8
+    check (await overlayCount(localStore)).tryGet() == 8
+    # Erasure coding added blocks; the protected dataset stays after cleanup
+    let
+      quotaConstructed = localStore.quotaUsedBytes
+      blocksConstructed = localStore.totalBlocks
+    check quotaConstructed > quotaBefore
+    check blocksConstructed > blocksBefore
 
     # Fulfill the purchase - triggers PurchaseSubmitted -> PurchaseStarted
     check eventually marketplace.requested.len > 0
@@ -486,11 +495,12 @@ suite "Test Node - Purchase overlay cleanup":
     # Wait for cleanup callback to run
     await sleepAsync(500.milliseconds)
 
-    # Original overlay remains, protected/verifiable + 5 slot overlays dropped
-    check (await overlayCount(localStore)).tryGet() == 1
-    # Quota and block count back to just original data
-    check localStore.quotaUsedBytes == quotaBefore
-    check localStore.totalBlocks == blocksBefore
+    # Original + protected overlays remain; verifiable + 5 slot dropped
+    check eventually (await overlayCount(localStore)).tryGet() == 2
+    # Verifiable + slot datasets reclaimed; the protected dataset is retained
+    check eventually localStore.quotaUsedBytes < quotaConstructed
+    check eventually localStore.totalBlocks < blocksConstructed
+    check eventually localStore.quotaUsedBytes > quotaBefore
 
   test "Should cleanup verifiable and slot overlays when purchase fails":
     let
@@ -523,11 +533,14 @@ suite "Test Node - Purchase overlay cleanup":
       )
     ).tryGet()
 
-    # Overlays: original + protected/verifiable + 5 slot overlays = 7
-    check (await overlayCount(localStore)).tryGet() == 7
-    # Erasure coding added blocks, so quota and block count grew
-    check localStore.quotaUsedBytes > quotaBefore
-    check localStore.totalBlocks > blocksBefore
+    # Overlays: original + protected + verifiable + 5 slot overlays = 8
+    check (await overlayCount(localStore)).tryGet() == 8
+    # Erasure coding added blocks; the protected dataset stays after cleanup
+    let
+      quotaConstructed = localStore.quotaUsedBytes
+      blocksConstructed = localStore.totalBlocks
+    check quotaConstructed > quotaBefore
+    check blocksConstructed > blocksBefore
 
     # Fulfill the purchase, then fail it
     check eventually marketplace.requested.len > 0
@@ -544,14 +557,13 @@ suite "Test Node - Purchase overlay cleanup":
     let purchasing = node.marketplace .? purchasing
     check eventually purchasing .? getPurchase(purchaseId) .? finished == true.some
 
-    # Wait for cleanup callback to run
-    await sleepAsync(100.milliseconds)
-
-    # Original overlay remains, protected/verifiable + 5 slot overlays dropped
-    check (await overlayCount(localStore)).tryGet() == 1
-    # Quota and block count back to just original data
-    check localStore.quotaUsedBytes == quotaBefore
-    check localStore.totalBlocks == blocksBefore
+    # Cleanup runs async: wait for the drops to finish.
+    # Original + protected overlays remain; verifiable + 5 slot dropped
+    check eventually (await overlayCount(localStore)).tryGet() == 2
+    # Verifiable + slot datasets reclaimed; the protected dataset is retained
+    check eventually localStore.quotaUsedBytes < quotaConstructed
+    check eventually localStore.totalBlocks < blocksConstructed
+    check eventually localStore.quotaUsedBytes > quotaBefore
 
   test "Should cleanup all manifests and leave repo empty after full lifecycle":
     let
@@ -581,14 +593,18 @@ suite "Test Node - Purchase overlay cleanup":
       )
     ).tryGet()
 
-    # Overlays: original + protected/verifiable + 5 slot overlays = 7
-    check (await overlayCount(localStore)).tryGet() == 7
+    # Overlays: original + protected + verifiable + 5 slot overlays = 8
+    check (await overlayCount(localStore)).tryGet() == 8
 
     # Fulfill the purchase - triggers PurchaseSubmitted -> PurchaseStarted
     check eventually marketplace.requested.len > 0
     let request = marketplace.requested[0]
     let requestEnd = StorageTimestamp.init(clock.now() + 42)
     marketplace.requestEnds[request.id] = requestEnd
+    # Captured before cleanup: the verifiable manifest block itself is
+    # reclaimed when its overlays drop (refCount -> 0).
+    let protectedTreeCid =
+      (await localStore.fetchManifest(request.content.cid)).tryGet().protectedTreeCid()
     marketplace.emitRequestFulfilled(request.id)
 
     # Advance clock past request end - triggers PurchaseStarted -> PurchaseFinished
@@ -598,19 +614,18 @@ suite "Test Node - Purchase overlay cleanup":
     let purchasing = node.marketplace .? purchasing
     check eventually purchasing .? getPurchase(purchaseId) .? finished == true.some
 
-    # Wait for cleanup callback to run
-    await sleepAsync(100.milliseconds)
+    # Cleanup runs async: wait for the drops to finish.
+    # Original + protected overlays remain; verifiable + 5 slot dropped
+    check eventually (await overlayCount(localStore)).tryGet() == 2
 
-    # Only original overlay remains after purchase completes
-    check (await overlayCount(localStore)).tryGet() == 1
-
-    # Simulate data expiry: drop the original overlay too
+    # Simulate data expiry: drop the original AND the protected overlay
+    (await localStore.dropOverlay(protectedTreeCid)).tryGet()
     (await localStore.dropOverlay(originalTreeCid)).tryGet()
 
     # Everything has been cleaned up - repo is empty
-    check (await overlayCount(localStore)).tryGet() == 0
-    check localStore.quotaUsedBytes == 0.NBytes
-    check localStore.totalBlocks == 0.Natural
+    check eventually (await overlayCount(localStore)).tryGet() == 0
+    check eventually localStore.quotaUsedBytes == 0.NBytes
+    check eventually localStore.totalBlocks == 0.Natural
 
 suite "Test Node - Maintenance expiry with requestStorage":
   var temporary: TemporaryNode
@@ -680,7 +695,7 @@ suite "Test Node - Maintenance expiry with requestStorage":
       )
     ).tryGet()
 
-    check (await overlayCount(localStore)).tryGet() == 7
+    check (await overlayCount(localStore)).tryGet() == 8
     check localStore.quotaUsedBytes > quotaOriginal
 
     clock.set(1000 + 30 * 24 * 3600 + 100) # well past 30-day TTL
@@ -688,6 +703,7 @@ suite "Test Node - Maintenance expiry with requestStorage":
     maintainer.start()
     await mockTimer.invokeCallback()
 
-    check (await overlayCount(localStore)).tryGet() == 0
-    check localStore.quotaUsedBytes == 0.NBytes
-    check localStore.totalBlocks == 0.Natural
+    # Expiry deletion is async: overlays go first, block reclamation trails.
+    check eventually (await overlayCount(localStore)).tryGet() == 0
+    check eventually localStore.quotaUsedBytes == 0.NBytes
+    check eventually localStore.totalBlocks == 0.Natural

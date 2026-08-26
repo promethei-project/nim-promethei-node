@@ -23,6 +23,16 @@ import ../../../helpers
 import ../../../helpers/mockclock
 import ../../../examples
 
+func verifiablePhysicalSize(prot: Manifest): NBytes =
+  ## The verifiable dataset's physical size: every protected leaf plus every
+  ## slot's parity blocks, at the protected block size. Matches the layout
+  ## binding enforced by Manifest.verify.
+  NBytes(
+    (
+      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
+    ).int * prot.blockSize.int
+  )
+
 import ./helpers
 
 proc testLifecycle*(
@@ -49,7 +59,7 @@ proc testLifecycle*(
       mockClock = MockClock.new()
       mockClock.set(now)
       repo = RepoStore.new(repoDs, metaDs, clock = mockClock, quotaMaxBytes =
-          2000'nb)
+          20000'nb)
 
     teardown:
       (await repoDs.close()).tryGet
@@ -802,7 +812,7 @@ proc testLifecycle*(
 
     test "Should delete verifiable manifest when no slot overlays remain":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -811,7 +821,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -822,7 +832,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -859,7 +870,7 @@ proc testLifecycle*(
 
     test "Should skip verifiable manifest delete when slot overlays still exist":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -868,7 +879,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -879,7 +890,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -927,7 +939,7 @@ proc testLifecycle*(
 
     test "Should handle protected and verifiable manifests independently":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -936,7 +948,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -947,7 +959,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -968,10 +981,9 @@ proc testLifecycle*(
       let
         protManifestBlk = (await repo.storeManifest(protManifest)).tryGet()
         verManifestBlk = (await repo.storeVerifiableManifest(verManifest)).tryGet()
-        dataBytes = NBytes(100 + 101 + 102 + 103)
         protManifestBytes = protManifestBlk.data.len.NBytes
         verManifestBytes = verManifestBlk.data.len.NBytes
-
+        dataBytes = NBytes(2100 + 2101 + 2102 + 2103)
       # All blocks + both manifests should be on disk
       for blk in blocks:
         check (await repo.getBlock(blk.cid)).isOk
@@ -1003,7 +1015,7 @@ proc testLifecycle*(
 
     test "Should track manifest refCount across slot overlays":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -1012,7 +1024,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -1023,7 +1035,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -1050,7 +1063,7 @@ proc testLifecycle*(
 
     test "Should cleanup manifest exactly once when slot overlays are dropped concurrently":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -1059,7 +1072,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -1070,7 +1083,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -1095,7 +1109,7 @@ proc testLifecycle*(
 
     test "Should attach only one slot overlay when slotIdx is provided":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -1104,7 +1118,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -1115,7 +1129,8 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
         .tryGet()
@@ -1193,7 +1208,7 @@ proc testLifecycle*(
     test "Should refresh expiry on existing overlay when storing manifest with explicit expiry":
       # Create a protected manifest first (use 4 blocks for ecK=2, ecM=2 = 4 slots)
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -1202,7 +1217,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -1214,7 +1229,8 @@ proc testLifecycle*(
 
       let verManifest =
         !Manifest.new(
-          protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          Cid.example,
           slotRoots,
         )
       let newExpiry = now + 2000
@@ -1243,7 +1259,7 @@ proc testLifecycle*(
 
     test "Should not double-count refCount when storing same slot concurrently":
       var blocks: seq[bt.Block]
-      for size in [100, 101, 102, 103]:
+      for size in [2100, 2101, 2102, 2103]:
         blocks.add(createTestBlock(size))
 
       let
@@ -1252,7 +1268,7 @@ proc testLifecycle*(
         protManifest = Manifest.new(
           manifest = baseManifest,
           treeCid = treeCid,
-          datasetSize = NBytes(8 * 103),
+          datasetSize = NBytes(8 * 2103),
           ecK = 2,
           ecM = 2,
         )
@@ -1264,7 +1280,8 @@ proc testLifecycle*(
       let
         verManifest =
           !Manifest.new(
-            protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+            protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+            Cid.example,
             slotRoots,
           )
         newExpiry = now + 3000

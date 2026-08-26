@@ -60,7 +60,8 @@ type Manifest* = ref object of RootObj
     discard
 
 const ManifestVersionV1* = 1'u32 # v1.0.0: locks cidVersion = CIDv1, parity packing
-const InnerCodeK* = 1'u32 # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
+const InnerCodeK* = 1'u32
+  # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
 const InnerCodeN* = 2'u32 # inner cell-code total shards N (> K)
 
 ############################################################
@@ -196,7 +197,9 @@ func colShards*(self: Manifest): int =
   self.colShards(self.numBlockCells, self.numSlotBlocksTotal)
 
 func firstPassParityBlocks*(self: Manifest, numBlockCells, slotBlocksTotal: int): int =
-  divUp(slotBlocksTotal * (self.rowShards(numBlockCells) - numBlockCells), numBlockCells)
+  divUp(
+    slotBlocksTotal * (self.rowShards(numBlockCells) - numBlockCells), numBlockCells
+  )
 
 func firstPassParityBlocks*(self: Manifest): int =
   self.firstPassParityBlocks(self.numBlockCells, self.numSlotBlocksTotal)
@@ -287,28 +290,56 @@ func verify*(self: Manifest): ?!void =
   ## Check manifest correctness
   ##
 
-  if self.protected and self.verifiable and (
-    self.innerK == 0 or self.innerN <= self.innerK or
-    (self.numBlockCells * self.innerN) mod self.innerK != 0 or
-    (self.numSlotBlocksTotal * self.innerN) mod self.innerK != 0
-  ):
-    return
-      failure newException(ArchivistError, "Broken manifest: inner code rate not supported")
+  # Raw-field validation first: every accessor below divides by these, and
+  # the fields arrive from the wire (no bounds checks under -d:danger).
+  # Branch fields (verifiable, cellSize) are only touched under
+  # `protected` — accessing them on an unprotected manifest is a Defect.
+  if self.blockSize.int <= 0:
+    return failure newException(PrometheiError, "Broken manifest: blockSize must be positive")
 
-  if self.protected and (
-    self.protectedBlocksCount != self.steps * (self.ecK + self.ecM)
-  ):
-    return
-      failure newException(PrometheiError, "Broken manifest: wrong originalBlocksCount")
+  if self.protected:
+    if self.ecK <= 0:
+      return failure newException(PrometheiError, "Broken manifest: ecK must be positive")
+    if self.numSlots <= 0:
+      return
+        failure newException(PrometheiError, "Broken manifest: numSlots must be positive")
+
+    if self.verifiable:
+      if self.cellSize.int <= 0:
+        return
+          failure newException(PrometheiError, "Broken manifest: cellSize must be positive")
+      if self.blockSize.int mod self.cellSize.int != 0:
+        return failure newException(
+          PrometheiError, "Broken manifest: blockSize not a multiple of cellSize"
+        )
+      if self.numBlockCells == 0 or self.innerK == 0 or self.innerN <= self.innerK or
+          (self.numBlockCells * self.innerN) mod self.innerK != 0 or
+          (self.numSlotBlocksTotal * self.innerN) mod self.innerK != 0:
+        return failure newException(
+          PrometheiError, "Broken manifest: inner code rate not supported"
+        )
+
+    if self.protectedBlocksCount != self.steps * (self.ecK + self.ecM):
+      return
+        failure newException(PrometheiError, "Broken manifest: wrong originalBlocksCount")
+
+    if self.verifiable:
+      let physicalSize =
+        (self.protectedBlocksCount + self.numSlots * self.parityBlocksPerSlot).NBytes *
+        self.blockSize
+      if self.datasetSize != physicalSize:
+        return failure newException(
+          PrometheiError, "Broken manifest: datasetSize does not match layout"
+        )
 
   return success()
 
 func `==`*(a, b: Manifest): bool =
   (a.treeCid == b.treeCid) and (a.datasetSize == b.datasetSize) and
     (a.blockSize == b.blockSize) and (a.version == b.version) and
-    (a.cidVersion == b.cidVersion) and
-    (a.hcodec == b.hcodec) and (a.codec == b.codec) and (a.protected == b.protected) and
-    (a.filename == b.filename) and (a.mimetype == b.mimetype) and (
+    (a.cidVersion == b.cidVersion) and (a.hcodec == b.hcodec) and (a.codec == b.codec) and
+    (a.protected == b.protected) and (a.filename == b.filename) and
+    (a.mimetype == b.mimetype) and (
     if a.protected:
       (a.ecK == b.ecK) and (a.ecM == b.ecM) and (a.originalTreeCid == b.originalTreeCid) and
         (a.originalDatasetSize == b.originalDatasetSize) and
@@ -528,7 +559,8 @@ func protectedView*(self: Manifest): ?!Manifest =
   ## Protected (non-verifiable) view of a verifiable manifest;
   ## repair addressing uses the protected root
   if not self.verifiable:
-    return failure newException(ArchivistError, "Manifest is not verifiable")
+    return failure newException(PrometheiError, "Manifest is not verifiable")
+
   success Manifest(
     treeCid: self.protectedTreeCid,
     datasetSize: self.protectedDatasetSize,

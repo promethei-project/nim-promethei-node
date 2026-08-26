@@ -19,6 +19,7 @@ import pkg/libp2p/multicodec
 
 import pkg/promethei/blocktype as bt
 import pkg/promethei/merkletree
+
 import pkg/promethei/stores
 import pkg/promethei/utils/asyncbarrier
 
@@ -29,6 +30,17 @@ import ../helpers
 import ../examples
 
 import promethei/stores/maintenance
+
+func verifiablePhysicalSize(prot: Manifest): NBytes =
+  ## The verifiable dataset's physical size (protected leaves + all slot
+  ## parity blocks at the protected block size); matches the layout binding
+  ## enforced by Manifest.verify.
+  NBytes(
+    (
+      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
+    ).int * prot.blockSize.int
+  )
+
 
 suite "BlockMaintainer":
   var
@@ -47,7 +59,7 @@ suite "BlockMaintainer":
     metaDs = SQLiteKVStore.new(SqliteMemory, tp).tryGet()
     mockClock = MockClock.new()
     mockClock.set(100)
-    repo = RepoStore.new(repoDs, metaDs, clock = mockClock, quotaMaxBytes = 2000'nb)
+    repo = RepoStore.new(repoDs, metaDs, clock = mockClock, quotaMaxBytes = 20000'nb)
     interval = 1.days
     mockTimer = MockTimer.new()
     maintainer =
@@ -227,12 +239,16 @@ suite "BlockMaintainer":
   test "Should cleanup protected and verifiable manifests via maintenance expiry":
     var blocks: seq[bt.Block]
     for i in 0 ..< 4:
-      blocks.add(bt.Block.new(("block-data-" & $i & "-for-maint").toBytes).tryGet())
+      # >= DefaultCellSize: the manifest must satisfy the inner-code
+      # geometry checks (numBlockCells >= 1) on store.
+      blocks.add(
+        bt.Block.new(("block-data-" & $i & "-for-maint").repeat(96).toBytes).tryGet()
+      )
 
     let
       (baseManifest, tree) = makeManifestAndTree(blocks).tryGet()
       treeCid = tree.rootCid.tryGet()
-      maxDataLen = 22 # length of each "block-data-X-for-maint" string
+      maxDataLen = 2112 # length of each repeated "block-data-X-for-maint" block
       protManifest = Manifest.new(
         manifest = baseManifest,
         treeCid = treeCid,
@@ -247,7 +263,8 @@ suite "BlockMaintainer":
 
     let verManifest = Manifest
       .new(
-        protManifest, protManifest.treeCid, protManifest.datasetSize, Cid.example,
+        protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+        Cid.example,
         slotRoots,
       )
       .tryGet()

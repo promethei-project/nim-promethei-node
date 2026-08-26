@@ -78,9 +78,7 @@ proc getSample*[SomeTree, SomeHash](
     # The slot leaf's block (data or parity - one flat position function)
     (bytes, blkTree) = (
       await self.builder.getSlotLeafBlock(
-        self.index,
-        self.builder.manifest.treeCid,
-        self.builder.manifest.treeCid,
+        self.index, self.builder.manifest.treeCid, self.builder.manifest.treeCid,
         blkSlotIdx.Natural,
       )
     ).valueOr:
