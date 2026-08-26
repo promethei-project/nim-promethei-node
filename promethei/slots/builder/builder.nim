@@ -475,7 +475,9 @@ proc encodeSlot*[SomeTree, SomeHash](
       self.numBlockCells.int, self.numSlotBlocks.int
     )
 
-  # 1. Data materialization: real blocks + zero-fill for pads
+  # 1. Data materialization: real blocks + filler for pads. Real blocks
+  # must be exactly blockSize: the cell slices below index fixed ranges
+  # and Leopard copies bufSize bytes regardless of real buffer length.
   let indices = ?self.slotIndices(slotIndex)
   var blocks = newSeq[seq[byte]](indices.len)
   for i, idx in indices:
@@ -483,8 +485,12 @@ proc encodeSlot*[SomeTree, SomeHash](
       if idx < protectedCount:
         let blk = ?await self.networkStore.getBlock(self.manifest.treeCid, idx)
         if blk.isEmpty:
-          self.emptyBlock # erasure pad leaf: zero-fill, never fetched over the wire
+          self.emptyBlock # erasure pad leaf: filler bytes, never fetched over the wire
         else:
+          if blk.data.len != self.manifest.blockSize.int:
+            return failure(
+              "Block length does not match manifest blockSize, idx: " & $idx
+            )
           blk.data
       else:
         self.emptyBlock
