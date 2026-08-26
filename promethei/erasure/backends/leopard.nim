@@ -56,7 +56,8 @@ method decode*(
   decoder.decode(data, parity, recovered)
 
 method release*(self: LeoEncoderBackend) =
-  self.encoder.get().free()
+  if self.encoder.isSome:
+    self.encoder.get().free()
 
 method release*(self: LeoDecoderBackend) =
   if self.decoder.isSome:
