@@ -192,9 +192,11 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
     if pbErasureInfo.getField(4, originalDatasetSize).isErr:
       return failure("Unable to decode `originalDatasetSize` from manifest!")
-
     if pbErasureInfo.getField(5, protectedStrategy).isErr:
       return failure("Unable to decode `protectedStrategy` from manifest!")
+
+    if protectedStrategy > high(StrategyType).uint32:
+      return failure("Unknown protected strategy")
 
     if pbErasureInfo.getField(6, pbVerificationInfo).isErr:
       return failure("Unable to decode `verificationInfo` from manifest!")
@@ -212,6 +214,9 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
       if pbVerificationInfo.getField(4, verifiableStrategy).isErr:
         return failure("Unable to decode `verifiableStrategy` from manifest!")
+
+      if verifiableStrategy > high(StrategyType).uint32:
+        return failure("Unknown verifiable strategy")
 
       if pbVerificationInfo.getField(5, protectedTreeCid).isErr:
         return failure("Unable to decode `protectedTreeCid` from manifest!")

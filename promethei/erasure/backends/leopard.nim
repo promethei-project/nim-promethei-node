@@ -37,6 +37,15 @@ method encode*(
   if parity.len == 0:
     return ok()
 
+  # Leopard copies bufSize bytes per shard regardless of the buffer's real
+  # length; short or over-long shards would read out of bounds.
+  for shard in data:
+    if shard.len != self.blockSize.int:
+      return error("Encode shard length does not match block size")
+  for shard in parity:
+    if shard.len != self.blockSize.int:
+      return error("Parity work buffer length does not match block size")
+
   var encoder =
     if self.encoder.isNone:
       withLock leoCoderInitLock:
@@ -52,6 +61,14 @@ method decode*(
     self: LeoDecoderBackend, data, parity, recovered: var seq[seq[byte]]
 ): Result[void, cstring] =
   ## Decode data using given Leopard backend
+
+  # Same hazard as encode: the wrapper copies bufSize bytes per shard.
+  for shard in data:
+    if shard.len != self.blockSize.int:
+      return error("Decode shard length does not match block size")
+  for shard in parity:
+    if shard.len != self.blockSize.int:
+      return error("Parity shard length does not match block size")
 
   var decoder =
     if self.decoder.isNone:
