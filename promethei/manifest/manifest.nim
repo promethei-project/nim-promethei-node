@@ -50,7 +50,7 @@ type Manifest* = ref object of RootObj
   else:
     discard
 
-const ManifestVersionV1* = 1'u32 # v1.0.0: locks cidVersion = CIDv1, parity packing
+const ManifestVersionV1* = 1'u32 # v1.0.0: fixes the inner rate and parity packing (CID version is not part of the layout)
 const InnerCodeK* = 1'u32
   # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
 const InnerCodeN* = 2'u32 # inner cell-code total shards N (> K)

@@ -981,19 +981,20 @@ proc storeSlot*(
       manifest.treeCid,
       status = Repairing.some,
       body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
-        without seedIter =? manifest.getSlotIterator(slotIndex.int), err:
-          return failure(err)
+        # Outer repair reconstructed the FULL protected dataset locally
+        # (under R_p). Re-seed every protected leaf under R_v - originals
+        # from the original tree, outer parity and pads from the protected
+        # tree - so recovery never depends on other slots' holders. Only
+        # the inner parity is not reconstructible here; it is regenerated
+        # below (it is deterministic from the slot's data).
         var items: seq[(bt.Block, Natural, ?ArchivistProof)]
-        while not seedIter.finished:
-          let idx = seedIter.next()
-          if idx >= manifest.protectedBlocksCount:
-            break # inner parity follows; regenerated below
-          if idx >= manifest.rounded:
-            let blk = ?await self.networkStore.getBlock(manifest.protectedTreeCid, idx)
-            items.add((blk, idx.Natural, ArchivistProof.none))
-          elif idx < manifest.originalBlocksCount:
-            let blk = ?await self.networkStore.getBlock(manifest.originalTreeCid, idx)
-            items.add((blk, idx.Natural, ArchivistProof.none))
+        for idx in 0 ..< manifest.protectedBlocksCount:
+          let blk =
+            if idx < manifest.originalBlocksCount:
+              ?await self.networkStore.getBlock(manifest.originalTreeCid, idx.Natural)
+            else:
+              ?await self.networkStore.getBlock(manifest.protectedTreeCid, idx.Natural)
+          items.add((blk, idx.Natural, ArchivistProof.none))
         ?await self.networkStore.putBlocks(manifest.treeCid, items)
         success(),
     )

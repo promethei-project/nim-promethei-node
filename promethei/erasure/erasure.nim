@@ -182,6 +182,11 @@ proc prepareEncodingData(
       blk = ?blkOrErr
 
     let pos = indexToPos(params.steps, idx, step)
+    # Leopard copies bufSize bytes regardless of the buffer's real length;
+    # a short (or over-long) block must fail here, not corrupt the encode.
+    if (not blk.isEmpty) and blk.data.len != params.blockSize.int:
+      return
+        failure("Block length does not match manifest blockSize, idx: " & $idx)
     data[pos] = if blk.isEmpty: emptyBlock else: blk.data
     cids[idx] = blk.cid
 
@@ -268,6 +273,11 @@ proc prepareDecodingData(
         steps = params.steps
       return failure("Decoded block position out of range")
 
+    # Leopard copies bufSize bytes regardless of the buffer's real length;
+    # a short (or over-long) block must fail here, not corrupt the decode.
+    if (not blk.isEmpty) and blk.data.len != params.blockSize.int:
+      return
+        failure("Block length does not match manifest blockSize, idx: " & $idx)
     if idx < params.rounded and pos >= params.ecK:
       error "Data block position exceeds ecK", pos, idx, step
       return failure("Data block position exceeds ecK")
