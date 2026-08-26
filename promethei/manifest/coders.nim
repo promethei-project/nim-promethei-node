@@ -263,15 +263,16 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     let
       verifyRootCid = ?Cid.init(verifyRoot).mapFailure
       slotRootCids = slotRoots.mapIt(?Cid.init(it).mapFailure)
-    let final = ?Manifest.new(
-      manifest = self,
-      treeCid = treeCid,
-      datasetSize = datasetSize.NBytes,
-      verifyRoot = verifyRootCid,
-      slotRoots = slotRootCids,
-      cellSize = cellSize.NBytes,
-      strategy = StrategyType(verifiableStrategy),
-    )
+    let final =
+      ?Manifest.new(
+        manifest = self,
+        treeCid = treeCid,
+        datasetSize = datasetSize.NBytes,
+        verifyRoot = verifyRootCid,
+        slotRoots = slotRootCids,
+        cellSize = cellSize.NBytes,
+        strategy = StrategyType(verifiableStrategy),
+      )
     # The intermediate check above validated the protected view; the final
     # verifiable manifest carries its own geometry and must stand on its own.
     ?(final.verify())

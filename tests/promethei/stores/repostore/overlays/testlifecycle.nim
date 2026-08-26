@@ -28,9 +28,8 @@ func verifiablePhysicalSize(prot: Manifest): NBytes =
   ## slot's parity blocks, at the protected block size. Matches the layout
   ## binding enforced by Manifest.verify.
   NBytes(
-    (
-      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
-    ).int * prot.blockSize.int
+    (prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot).int *
+      prot.blockSize.int
   )
 
 import ./helpers
@@ -832,7 +831,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -890,7 +891,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -959,7 +962,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -1035,7 +1040,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -1083,7 +1090,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -1129,7 +1138,9 @@ proc testLifecycle*(
 
       let verManifest = Manifest
         .new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -1229,7 +1240,9 @@ proc testLifecycle*(
 
       let verManifest =
         !Manifest.new(
-          protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+          protManifest,
+          protManifest.treeCid,
+          verifiablePhysicalSize(protManifest),
           Cid.example,
           slotRoots,
         )
@@ -1280,7 +1293,9 @@ proc testLifecycle*(
       let
         verManifest =
           !Manifest.new(
-            protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+            protManifest,
+            protManifest.treeCid,
+            verifiablePhysicalSize(protManifest),
             Cid.example,
             slotRoots,
           )

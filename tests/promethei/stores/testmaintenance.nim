@@ -27,11 +27,9 @@ func verifiablePhysicalSize(prot: Manifest): NBytes =
   ## parity blocks at the protected block size); matches the layout binding
   ## enforced by Manifest.verify.
   NBytes(
-    (
-      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
-    ).int * prot.blockSize.int
+    (prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot).int *
+      prot.blockSize.int
   )
-
 
 suite "BlockMaintainer":
   var
@@ -254,7 +252,9 @@ suite "BlockMaintainer":
 
     let verManifest = Manifest
       .new(
-        protManifest, protManifest.treeCid, verifiablePhysicalSize(protManifest),
+        protManifest,
+        protManifest.treeCid,
+        verifiablePhysicalSize(protManifest),
         Cid.example,
         slotRoots,
       )

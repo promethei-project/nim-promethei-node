@@ -286,19 +286,24 @@ func verify*(self: Manifest): ?!void =
   # Branch fields (verifiable, cellSize) are only touched under
   # `protected` — accessing them on an unprotected manifest is a Defect.
   if self.blockSize.int <= 0:
-    return failure newException(PrometheiError, "Broken manifest: blockSize must be positive")
+    return failure newException(
+      PrometheiError, "Broken manifest: blockSize must be positive"
+    )
 
   if self.protected:
     if self.ecK <= 0:
-      return failure newException(PrometheiError, "Broken manifest: ecK must be positive")
-    if self.numSlots <= 0:
       return
-        failure newException(PrometheiError, "Broken manifest: numSlots must be positive")
+        failure newException(PrometheiError, "Broken manifest: ecK must be positive")
+    if self.numSlots <= 0:
+      return failure newException(
+        PrometheiError, "Broken manifest: numSlots must be positive"
+      )
 
     if self.verifiable:
       if self.cellSize.int <= 0:
-        return
-          failure newException(PrometheiError, "Broken manifest: cellSize must be positive")
+        return failure newException(
+          PrometheiError, "Broken manifest: cellSize must be positive"
+        )
       if self.blockSize.int mod self.cellSize.int != 0:
         return failure newException(
           PrometheiError, "Broken manifest: blockSize not a multiple of cellSize"
@@ -311,8 +316,9 @@ func verify*(self: Manifest): ?!void =
         )
 
     if self.protectedBlocksCount != self.steps * (self.ecK + self.ecM):
-      return
-        failure newException(PrometheiError, "Broken manifest: wrong originalBlocksCount")
+      return failure newException(
+        PrometheiError, "Broken manifest: wrong originalBlocksCount"
+      )
 
     if self.verifiable:
       let physicalSize =

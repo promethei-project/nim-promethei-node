@@ -259,18 +259,27 @@ proc prepareDecodingData(
     # -d:danger).
     if pos < 0 or pos >= params.ecK + params.ecM:
       error "Decoded block position out of range",
-        pos, idx, step, ecK = params.ecK, ecM = params.ecM,
-        rounded = params.rounded, steps = params.steps
+        pos,
+        idx,
+        step,
+        ecK = params.ecK,
+        ecM = params.ecM,
+        rounded = params.rounded,
+        steps = params.steps
       return failure("Decoded block position out of range")
+
     if idx < params.rounded and pos >= params.ecK:
       error "Data block position exceeds ecK", pos, idx, step
       return failure("Data block position exceeds ecK")
+
     if idx >= params.rounded and pos < params.ecK:
       error "Parity block position below ecK", pos, idx, step
       return failure("Parity block position below ecK")
+
     if idx < 0 or idx >= cids[].len:
       error "Block index out of range", idx, cidsLen = cids[].len
       return failure("Block index out of range")
+
     cids[idx] = blk.cid
     if idx >= params.rounded:
       trace "Retrieved parity block"

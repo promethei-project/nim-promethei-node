@@ -424,7 +424,8 @@ proc packParityCells(
     blockBytes = cellsPerBlock * cellSize
     count = divUp(cells.len, blockBytes)
   for i in 0 ..< count:
-    var blk = newSeqWith(blockBytes, 0'u8) # explicit: newSeq does not zero under -d:danger
+    var blk = newSeqWith(blockBytes, 0'u8)
+      # explicit: newSeq does not zero under -d:danger
     let
       start = i * blockBytes
       len = min(blockBytes, cells.len - start)

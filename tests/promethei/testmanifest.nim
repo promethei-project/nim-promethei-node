@@ -20,9 +20,8 @@ func verifiablePhysicalSize(prot: Manifest): NBytes =
   ## parity blocks at the protected block size); matches the layout binding
   ## enforced by Manifest.verify.
   NBytes(
-    (
-      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
-    ).int * prot.blockSize.int
+    (prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot).int *
+      prot.blockSize.int
   )
 
 proc encodeDecode(manifest: Manifest): Manifest =
