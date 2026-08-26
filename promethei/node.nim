@@ -1028,10 +1028,11 @@ proc storeSlot*(
     # Erasure pads are empty-Cid leaves; they have no stored record
     for idx in manifest.originalBlocksCount ..< manifest.rounded:
       allCids[][idx] = ?emptyCid(manifest.cidVersion, manifest.hcodec, BlockCodec)
-    let root = ?await erasure.treeAndProofs(allCids, manifest.treeCid)
-    if root != manifest.treeCid:
-      return
-        failure(newException(ArchivistError, "Rebuilt verifiable tree root mismatch"))
+    # Compare before commit: nothing is stored if the rebuilt root
+    # diverges from the committed one.
+    discard ?await erasure.treeAndProofs(
+      allCids, manifest.treeCid, expectedRoot = manifest.treeCid.some
+    )
   else:
     if err =? (await self.fetchBatched(manifest.treeCid, blksIter)).errorOption:
       error "Unable to fetch blocks", err = err.msg

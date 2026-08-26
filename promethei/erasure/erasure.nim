@@ -486,10 +486,12 @@ proc encodeData(
   success cids
 
 proc treeAndProofs*(
-    self: Erasure, cids: ref seq[Cid], targetCid: Cid
+    self: Erasure, cids: ref seq[Cid], targetCid: Cid, expectedRoot = Cid.none
 ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
   ## Build a tree over `cids`, store per-leaf proofs under `targetCid`,
-  ## and return the tree root.
+  ## and return the tree root. When `expectedRoot` is provided, the built
+  ## root is compared against it BEFORE anything is stored - a mismatch
+  ## fails without committing proofs.
   ##
   if cids[].len == 0:
     return failure "Empty leaves"
@@ -508,6 +510,10 @@ proc treeAndProofs*(
         cidsIter, self.taskPool, mcodec = (?cids[][0].mhash.mapFailure).mcodec
       )
     treeCid = ?tree.rootCid
+
+  if (n =? expectedRoot) and treeCid != n:
+    return
+      failure "Rebuilt tree root does not match the committed root; nothing stored"
 
   var proofItems: seq[(Natural, Cid, PrometheiProof)]
   for index, cid in cids[]:
@@ -552,7 +558,11 @@ proc encode*(
         .} =
           let cids =
             ?await self.encodeData(sourceManifest.treeCid, manifest.treeCid, params)
-          await self.treeAndProofs(cids, manifest.treeCid)
+          success(
+            ?await self.treeAndProofs(
+              cids, manifest.treeCid, expectedRoot = manifest.treeCid.some
+            )
+          )
         ,
       )
     else:
@@ -562,7 +572,7 @@ proc encode*(
         ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
           let cids = ?await self.encodeData(sourceManifest.treeCid, tmpCid, params)
 
-          await self.treeAndProofs(cids, tmpCid)
+          success(?await self.treeAndProofs(cids, tmpCid))
       )
 
   let protected = Manifest.new(
