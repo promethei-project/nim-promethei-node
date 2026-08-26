@@ -214,12 +214,23 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
 
   var filenameOption = if filename.len == 0: string.none else: filename.some
   var mimetypeOption = if mimetype.len == 0: string.none else: mimetype.some
+  # For verifiable manifests the wire's top-level treeCid/datasetSize
+  # describe the ENLARGED verifiable dataset; the protected view arrives in
+  # VerificationInfo fields 5/6 and becomes the intermediate manifest's
+  # treeCid/datasetSize (the verifiable ctor captures them as
+  # protectedTreeCid/protectedDatasetSize).
+  var
+    viewTreeCidBuf = treeCidBuf
+    viewDatasetSize = datasetSize
+  if verifiable:
+    viewTreeCidBuf = protectedTreeCid
+    viewDatasetSize = protectedDatasetSize
 
   let self =
     if protected:
       Manifest.new(
-        treeCid = treeCid,
-        datasetSize = datasetSize.NBytes,
+        treeCid = ?Cid.init(viewTreeCidBuf).mapFailure,
+        datasetSize = viewDatasetSize.NBytes,
         blockSize = blockSize.NBytes,
         version = version,
         cidVersion = cidVersion.CidVersion,
@@ -252,8 +263,7 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     let
       verifyRootCid = ?Cid.init(verifyRoot).mapFailure
       slotRootCids = slotRoots.mapIt(?Cid.init(it).mapFailure)
-
-    return Manifest.new(
+    let final = ?Manifest.new(
       manifest = self,
       treeCid = treeCid,
       datasetSize = datasetSize.NBytes,
@@ -262,7 +272,10 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
       cellSize = cellSize.NBytes,
       strategy = StrategyType(verifiableStrategy),
     )
-
+    # The intermediate check above validated the protected view; the final
+    # verifiable manifest carries its own geometry and must stand on its own.
+    ?(final.verify())
+    return success final
   self.success
 
 func decode*(_: type Manifest, blk: Block): ?!Manifest =

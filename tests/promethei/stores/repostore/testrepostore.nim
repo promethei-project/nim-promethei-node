@@ -760,7 +760,7 @@ proc testRepoStore*(
         check proof.path == memoryProof.path
         check proof.verify(tree.leaves[i], tree.root.tryGet()).tryGet()
 
-    test "Should fail serving when flat tree nodes are missing":
+    test "Should degrade to stored proofs when flat tree nodes are missing":
       let
         dataset = (await makeRandomBlocks(datasetSize = 768, blockSize = 256'nb)).tryGet
         (manifest, tree) = makeManifestAndTree(dataset).tryGet()
@@ -773,9 +773,19 @@ proc testRepoStore*(
       storeTreeLeaves(bigRepo, treeCid, tree, dataset)
       (await bigRepo.delTreeNodes(treeCid)).tryGet()
 
+      # Proof generation from the flat tree nodes fails, but the stored
+      # proofs keep the dataset servable.
       let got = await bigRepo.getBlocksAndProofs(treeCid, @[0.Natural])
-      check got.isErr
-      check got.error of TreeNodeNotFoundError
+      check got.isOk
+      let served = got.get()
+      check served.len == 1
+      check served[0][0] == 0.Natural
+      check served[0][1].cid == dataset[0].cid
+      let servedProof = served[0][2].get()
+      let expectedProof = tree.getProof(0).tryGet()
+      check servedProof.index == expectedProof.index
+      check servedProof.nleaves == expectedProof.nleaves
+      check servedProof.path == expectedProof.path
 
     test "Should serve stored proofs when manifest is missing":
       let
@@ -1074,11 +1084,19 @@ proc testRepoStore*(
       # (flatIdx 8 = level 1, node 0): the level>0 hard-fail branch.
       let deletedIdx = flatIndex(8, 1, 0).tryGet().Natural
       (await bigRepo.delTreeNodes(treeCid, @[deletedIdx])).tryGet()
-
       let got = await bigRepo.getBlocksAndProofs(treeCid, @[2.Natural])
-      check got.isErr
-      check got.error of TreeNodeNotFoundError
-
+      # Generation fails (the deleted internal node), the stored proof
+      # keeps the leaf servable.
+      check got.isOk
+      let served = got.get()
+      check served.len == 1
+      check served[0][0] == 2.Natural
+      check served[0][1].cid == dataset[2].cid
+      let servedProof = served[0][2].get()
+      let expectedProof = tree.getProof(2).tryGet()
+      check servedProof.index == expectedProof.index
+      check servedProof.nleaves == expectedProof.nleaves
+      check servedProof.path == expectedProof.path
     test "Should reject forged proofs with wrong nleaves":
       let
         dataset =
@@ -1150,12 +1168,14 @@ proc testRepoStore*(
       for i in 0 ..< tree.leavesCount:
         check fallbackResults[i][2].get().path == tree.getProof(i).tryGet().path
 
-      # Completed again: generated serving is back, and with the flat nodes
-      # gone the missing root now hard-fails.
+      # Completed again: with the flat nodes gone, generation fails and
+      # serving degrades to the stored proofs.
       (await bigRepo.putOverlay(treeCid, status = Completed.some)).tryGet()
       let got = await bigRepo.getBlocksAndProofs(treeCid, @[0.Natural])
-      check got.isErr
-      check got.error of TreeNodeNotFoundError
+      check got.isOk
+      let served = got.get()
+      check served.len == 1
+      check served[0][2].get().path == tree.getProof(0).tryGet().path
 
     test "Should distinguish missing leaf from missing sibling in getTreeProof":
       let

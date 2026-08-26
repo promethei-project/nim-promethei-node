@@ -310,6 +310,17 @@ proc streamEntireDataset(
   trace "Retrieving blocks from manifest", manifestCid
 
   var jobs: seq[Future[void]]
+
+  # Outer-EC geometry must come from the protected view: the verifiable
+  # manifest's blocksCount counts 2.5D physical leaves, which over-iterates
+  # the outer strategy by the inner parity. Derived synchronously so a
+  # malformed manifest fails the retrieval instead of a background job.
+  let decodeTarget =
+    if manifest.verifiable:
+      ?manifest.protectedView
+    else:
+      manifest
+
   let stream = LPStream(StoreStream.new(self.networkStore, manifest, pad = false))
   if manifest.protected:
     # For protected manifests, erasure.decode owns the overlay lifecycle
@@ -322,7 +333,10 @@ proc streamEntireDataset(
           self.taskpool,
         )
 
-        if err =? (await erasure.decode(manifest)).errorOption:
+        # A verifiable dataset's shards are served under the verifiable
+        # root; the protected view only supplies the outer-EC geometry.
+        let fetchRoot = if manifest.verifiable: some(manifest.treeCid) else: Cid.none
+        if err =? (await erasure.decode(decodeTarget, fetchRoot)).errorOption:
           error "Unable to erasure decode manifest", manifestCid, exc = err.msg
           return
       except CatchableError as exc:
@@ -690,6 +704,14 @@ proc ensureProtectedManifest(
       )
 
     trace "Provided manifest is already protected"
+    # Attach to the protected overlay: durability + shape-resolved serving.
+    # For an already-verifiable manifest the top-level root is the verifiable
+    # tree; the protected overlay must receive the protected view.
+    if manifest.verifiable:
+      let view = ?manifest.protectedView
+      discard ?await self.repoStore.storeManifest(view)
+    else:
+      discard ?await self.repoStore.storeManifest(manifest)
     return success manifest
 
   # Erasure code the dataset according to provided parameters
@@ -699,6 +721,8 @@ proc ensureProtectedManifest(
       leoDecoderProvider, self.taskpool,
     )
     encodedManifest = ?await erasure.encode(manifest, ecK, ecM)
+  # Attach to the protected overlay: durability + shape-resolved serving.
+  discard ?await self.repoStore.storeManifest(encodedManifest)
 
   success encodedManifest
 
@@ -917,20 +941,83 @@ proc storeSlot*(
 
   if repair:
     trace "Start repairing slot", slotIdx
+
+    # Metadata preflight: repair needs the protected view (root, sizes,
+    # ec parameters) to be derivable and consistent before anything is
+    # written; without it the dataset-level repair cannot proceed.
     let erasure = Erasure.new(
       self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
       self.taskpool,
     )
-    if err =? (await erasure.repair(manifest)).errorOption:
-      error "Unable to erasure decode repairing manifest",
-        cid = manifest.treeCid, exc = err.msg
+
+    without protected =? manifest.protectedView, err:
+      error "Unable to derive protected view for repair", err = err.msg
       return failure(err)
 
-    while not blksIter.finished:
-      without blk =? await self.networkStore.getBlock(manifest.treeCid, blksIter.next()),
-        err:
-        error "Unable to get slot block after repair"
-        return failure(err)
+    if err =? protected.verify().errorOption:
+      error "Protected view failed verification", err = err.msg
+      return failure(err)
+
+    # Outer (dataset-level) repair: fetch shards under the verifiable root
+    # (the only root peers can prove; the protected dataset is its prefix at
+    # identical indices), reconstruct the original blocks and re-encode the
+    # outer parity into the protected view.
+    if err =? (await erasure.repair(protected, manifest.treeCid.some)).errorOption:
+      error "Unable to erasure repair protected dataset",
+        cid = protected.treeCid, exc = err.msg
+      return failure(err)
+
+    # Bring the entire verifiable tree down: re-seed this slot's data leaves
+    # (originals from the decoded original tree, outer parity from the
+    # re-encoded protected view), fetch every remaining data leaf from
+    # peers, and regenerate every slot's inner parity - it is deterministic
+    # from the slot's data, so encoding all slots completes the full
+    # leaf-cid list even when the original slot holders are gone.
+    ?await self.repoStore.withOverlay(
+      manifest.treeCid,
+      status = Repairing.some,
+      body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
+        without seedIter =? manifest.getSlotIterator(slotIndex.int), err:
+          return failure(err)
+        var items: seq[(bt.Block, Natural, ?ArchivistProof)]
+        while not seedIter.finished:
+          let idx = seedIter.next()
+          if idx >= manifest.protectedBlocksCount:
+            break # inner parity follows; regenerated below
+          if idx >= manifest.rounded:
+            let blk = ?await self.networkStore.getBlock(manifest.protectedTreeCid, idx)
+            items.add((blk, idx.Natural, ArchivistProof.none))
+          elif idx < manifest.originalBlocksCount:
+            let blk = ?await self.networkStore.getBlock(manifest.originalTreeCid, idx)
+            items.add((blk, idx.Natural, ArchivistProof.none))
+        ?await self.networkStore.putBlocks(manifest.treeCid, items)
+        success(),
+    )
+
+    ?await self.fetchBatched(
+      manifest.treeCid,
+      Iter[int].new(0 ..< manifest.protectedBlocksCount),
+      fetchLocal = false,
+    )
+
+    for s in 0 ..< manifest.numSlots:
+      discard ?await builder.encodeSlot(s.Natural, manifest.treeCid, self.taskpool)
+
+    # Mint R_v proofs for the WHOLE tree: with the full leaf-cid list
+    # local, storing every leaf's proof (and tree nodes) makes this node a
+    # full-tree holder - its slot keeps serving after the dataset builder
+    # is gone. The rebuilt root must match the committed one.
+    let allCids = seq[Cid].new()
+    allCids[].setLen(manifest.blocksCount)
+    for idx in 0 ..< manifest.blocksCount:
+      allCids[][idx] = ?await self.repoStore.getCid(manifest.treeCid, idx.Natural)
+    # Erasure pads are empty-Cid leaves; they have no stored record
+    for idx in manifest.originalBlocksCount ..< manifest.rounded:
+      allCids[][idx] = ?emptyCid(manifest.cidVersion, manifest.hcodec, BlockCodec)
+    let root = ?await erasure.treeAndProofs(allCids, manifest.treeCid)
+    if root != manifest.treeCid:
+      return
+        failure(newException(ArchivistError, "Rebuilt verifiable tree root mismatch"))
   else:
     if err =? (await self.fetchBatched(manifest.treeCid, blksIter)).errorOption:
       error "Unable to fetch blocks", err = err.msg

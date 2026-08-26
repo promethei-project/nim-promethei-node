@@ -438,3 +438,63 @@ suite "Erasure encode/decode":
         parityIdx = encoded.rounded + j * encoded.steps
         storedParity = (await store.getBlock(encoded.treeCid, parityIdx)).tryGet()
       check storedParity.data == stripeParity[j]
+
+  test "Should decode stripes with all data present":
+    let
+      k = 4
+      freshChunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
+      shards = newSeqWith(k, (await freshChunker.getBytes()).tryGet())
+
+    let decoded = (await erasure.decodeStripes(shards, @[])).tryGet()
+    check decoded == shards
+
+  test "Should recover missing data shards from parity":
+    let
+      k = 4
+      parityCount = 2
+      freshChunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
+      shards = newSeqWith(k, (await freshChunker.getBytes()).tryGet())
+      parity = (await erasure.encodeStripes(shards, parityCount)).tryGet()
+
+    var broken = shards
+    broken[1] = @[]
+    broken[3] = @[]
+
+    let recovered = (await erasure.decodeStripes(broken, parity)).tryGet()
+    check recovered == shards
+
+  test "Should recover with exactly k shards available":
+    let
+      k = 4
+      parityCount = 2
+      freshChunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
+      shards = newSeqWith(k, (await freshChunker.getBytes()).tryGet())
+      parity = (await erasure.encodeStripes(shards, parityCount)).tryGet()
+
+    var broken = shards
+    broken[2] = @[] # 3 data shards present
+    var partialParity = parity
+    partialParity[1] = @[] # 1 parity shard -> exactly k pieces
+
+    let recovered = (await erasure.decodeStripes(broken, partialParity)).tryGet()
+    check recovered == shards
+
+  test "Should reject insufficient shards for decoding":
+    let
+      k = 4
+      parityCount = 2
+      freshChunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
+      shards = newSeqWith(k, (await freshChunker.getBytes()).tryGet())
+      parity = (await erasure.encodeStripes(shards, parityCount)).tryGet()
+
+    var broken = shards
+    broken[1] = @[]
+    broken[3] = @[] # 2 data shards present
+    var partialParity = parity
+    partialParity[1] = @[] # 1 parity shard -> 3 pieces < k
+
+    check (await erasure.decodeStripes(broken, partialParity)).isErr
+
+  test "Should reject mismatched shard lengths in decodeStripes":
+    let stripes = @[newSeq[byte](8), newSeq[byte](16)]
+    check (await erasure.decodeStripes(stripes, @[])).isErr

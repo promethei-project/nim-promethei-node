@@ -1,9 +1,17 @@
 import std/options
+import std/locks
 
 import pkg/leopard
 import pkg/results
 
 import ../backend
+
+# LeoCoder.init performs the leopard library's first-use initialization
+# (table setup) via a thread-local `once`; a second thread reaching
+# leo_encode before that init completes sees Leopard_CallInitialize.
+# Serialize first-use coder construction process-wide.
+var leoCoderInitLock: Lock
+leoCoderInitLock.initLock()
 
 type
   LeoEncoderBackend* = ref object of EncoderBackend
@@ -22,13 +30,13 @@ method encode*(
 
   var encoder =
     if self.encoder.isNone:
-      self.encoder = (?LeoEncoder.init(self.blockSize, self.buffers, self.parity)).some
+      withLock leoCoderInitLock:
+        self.encoder = (?LeoEncoder.init(self.blockSize, self.buffers, self.parity)).some
       self.encoder.get()
     else:
       self.encoder.get()
 
   encoder.encode(data, parity)
-
 method decode*(
     self: LeoDecoderBackend, data, parity, recovered: var seq[seq[byte]]
 ): Result[void, cstring] =
@@ -36,13 +44,13 @@ method decode*(
 
   var decoder =
     if self.decoder.isNone:
-      self.decoder = (?LeoDecoder.init(self.blockSize, self.buffers, self.parity)).some
+      withLock leoCoderInitLock:
+        self.decoder = (?LeoDecoder.init(self.blockSize, self.buffers, self.parity)).some
       self.decoder.get()
     else:
       self.decoder.get()
 
   decoder.decode(data, parity, recovered)
-
 method release*(self: LeoEncoderBackend) =
   if self.encoder.isSome:
     self.encoder.get().free()

@@ -15,6 +15,16 @@ import ../asynctest
 import ./helpers
 import ./examples
 
+func verifiablePhysicalSize(prot: Manifest): NBytes =
+  ## The verifiable dataset's physical size (protected leaves + all slot
+  ## parity blocks at the protected block size); matches the layout binding
+  ## enforced by Manifest.verify.
+  NBytes(
+    (
+      prot.protectedBlocksCount + prot.numSlots * prot.parityBlocksPerSlot
+    ).int * prot.blockSize.int
+  )
+
 proc encodeDecode(manifest: Manifest): Manifest =
   let e = manifest.encode().tryGet()
   Manifest.decode(e).tryGet()
@@ -46,7 +56,7 @@ suite "Manifest":
       .new(
         manifest = protectedManifest,
         treeCid = protectedManifest.treeCid,
-        datasetSize = protectedManifest.datasetSize,
+        datasetSize = verifiablePhysicalSize(protectedManifest),
         verifyRoot = verifyCid,
         slotRoots = slotLeavesCids,
       )
@@ -195,11 +205,19 @@ suite "Manifest - Attribute Inheritance":
   test "Verifiable manifest round-trip preserves version and protected view":
     let
       protected = makeProtectedManifest(SteppedStrategy)
+      # production shape: the top level describes the ENLARGED verifiable
+      # dataset, the protected view is carried in the verifiable section
+      verifiableSize = (
+        protected.blockSize.int * (
+          protected.protectedBlocksCount +
+          protected.numSlots * protected.parityBlocksPerSlot
+        )
+      ).NBytes
       verifiable = Manifest
         .new(
           manifest = protected,
-          treeCid = protected.treeCid,
-          datasetSize = protected.datasetSize,
+          treeCid = Cid.example,
+          datasetSize = verifiableSize,
           verifyRoot = Cid.example,
           slotRoots = @[Cid.example, Cid.example],
         )
@@ -210,6 +228,9 @@ suite "Manifest - Attribute Inheritance":
       decoded.cidVersion == protected.cidVersion
       decoded.innerK == 1 # layout-version constant (bring-up rate 1:2)
       decoded.innerN == 2
+      decoded.treeCid == verifiable.treeCid
+      decoded.datasetSize == verifiableSize
+      decoded.blocksCount == verifiable.blocksCount
       decoded.protectedTreeCid == protected.treeCid
       decoded.protectedDatasetSize == protected.datasetSize
 
@@ -237,7 +258,7 @@ suite "Manifest - Attribute Inheritance":
       .new(
         manifest = makeProtectedManifest(SteppedStrategy), # 10 protected blocks
         treeCid = Cid.example,
-        datasetSize = 12.MiBs, # enlarged physical dataset
+        datasetSize = verifiablePhysicalSize(makeProtectedManifest(SteppedStrategy)),
         verifyRoot = Cid.example,
         slotRoots = @[Cid.example, Cid.example],
       )
