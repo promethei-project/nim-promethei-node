@@ -7,8 +7,8 @@ import pkg/questionable
 import pkg/questionable/results
 import pkg/zippy/tarballs
 import pkg/chronos/apps/http/httpclient
-import ../../archivist/marketplace/contracts/marketplacecontract
-import ../../archivist/marketplace/contracts/deployment
+import ../../promethei/marketplace/contracts/marketplacecontract
+import ../../promethei/marketplace/contracts/deployment
 
 proc printHelp() =
   info "Usage: ./cirdl [circuitPath] [rpcEndpoint] ([marketplaceAddress])"

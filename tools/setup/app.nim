@@ -8,11 +8,11 @@ import pkg/questionable
 import pkg/ethers
 import ./print
 import ./networkconfig
-from ../../archivist/utils/fileutils import secureWriteFile, ioErrorMsg
+from ../../promethei/utils/fileutils import secureWriteFile, ioErrorMsg
 
 type App* = ref object
   configLines: seq[string]
-  networkConfig: ?ArchivistNetwork
+  networkConfig: ?PrometheiNetwork
 
   ethAddress: string
   # if we have networkConfig AND storage mode (not manual) is selected
@@ -26,7 +26,7 @@ type App* = ref object
 proc writeConfigLine*(app: App, line: string) =
   app.configLines.add(line)
 
-proc fetchNetworkConfig*(app: App, network: string): ArchivistNetwork =
+proc fetchNetworkConfig*(app: App, network: string): PrometheiNetwork =
   without var networkConfig =? app.networkConfig:
     info "Fetching network information...", network
     networkConfig = getNetworkConfig(network)
@@ -103,7 +103,7 @@ proc writeLinesToFile(app: App) =
   defer:
     f.close()
 
-  f.writeLine("# Archivist configuration file")
+  f.writeLine("# Promethei configuration file")
   f.writeLine("# created using setup executable")
   f.writeLine("")
   for line in app.configLines:
@@ -123,7 +123,7 @@ proc displayFaucetLinks(app: App) =
   newline()
 
 proc displayRunInstruction() =
-  p1("You can start your Archivist node now by running the archivist executable.")
+  p1("You can start your Promethei node now by running the promethei executable.")
   p1("It will automatically detect and use the config file created by setup.")
   p1("For more information, run with '--help'")
   newline()

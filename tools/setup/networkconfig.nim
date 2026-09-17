@@ -20,29 +20,29 @@ const compiledVersion* = getCompiledVersion()
 type
   NetworkConfig* = object
     latest* {.serialize.}: string
-    sprs* {.serialize.}: seq[ArchivistSprEntry]
+    sprs* {.serialize.}: seq[PrometheiSprEntry]
     rpcs* {.serialize.}: seq[string]
-    marketplace* {.serialize.}: seq[ArchivistMarketplaceEntry]
+    marketplace* {.serialize.}: seq[PrometheiMarketplaceEntry]
 
-  ArchivistSprEntry* = object
+  PrometheiSprEntry* = object
     supportedVersions* {.serialize.}: seq[string]
     records* {.serialize.}: seq[string]
 
-  ArchivistMarketplaceEntry* = object
+  PrometheiMarketplaceEntry* = object
     supportedVersions* {.serialize.}: seq[string]
     contractAddress* {.serialize.}: string
 
 # Application types
-type ArchivistNetwork* = object
-  spr*: ArchivistSprEntry
+type PrometheiNetwork* = object
+  spr*: PrometheiSprEntry
   rpcs* {.serialize.}: seq[string]
-  marketplace*: ArchivistMarketplaceEntry
+  marketplace*: PrometheiMarketplaceEntry
 
 # Connector
-const EnvVarNetwork = "ARCHIVIST_NETWORK"
-const EnvVarVersion = "ARCHIVIST_VERSION"
-const EnvVarConfigUrl = "ARCHIVIST_CONFIG_URL"
-const EnvVarConfigFile = "ARCHIVIST_CONFIG_FILE"
+const EnvVarNetwork = "PROMETHEI_NETWORK"
+const EnvVarVersion = "PROMETHEI_VERSION"
+const EnvVarConfigUrl = "PROMETHEI_CONFIG_URL"
+const EnvVarConfigFile = "PROMETHEI_CONFIG_FILE"
 
 proc getEnvOrDefault(key: string, default: string): string =
   return getEnv(key, default)
@@ -82,7 +82,7 @@ proc fetchModel(network: string): NetworkConfig =
 proc getCompiledNodeVersion(): string =
   if compiledVersion.isEmptyOrWhitespace:
     raiseAssert(
-      "Error: This application was not compiled from a versioned Archivist revision. " &
+      "Error: This application was not compiled from a versioned Promethei revision. " &
         "Unable to determine version information automatically. Please define '" &
         EnvVarVersion & "' and try again."
     )
@@ -96,27 +96,27 @@ proc getVersion(fullModel: NetworkConfig): string =
     return selected
   return getCompiledNodeVersion()
 
-proc mapToVersion(fullModel: NetworkConfig): ArchivistNetwork =
+proc mapToVersion(fullModel: NetworkConfig): PrometheiNetwork =
   let selected = getVersion(fullModel)
   info "Mapping to version", version = selected
   let sprs = fullModel.sprs.filterIt(it.supportedVersions.contains(selected))
   if sprs.len < 1:
     error "Unable to find network configuration for selected version.",
       version = selected
-    error "Setup is intended to be used only from released versions of Archivist."
+    error "Setup is intended to be used only from released versions of Promethei."
     error "You can override the version information by setting the following environment variable:",
       versionVarName = EnvVarVersion
     error "Alternatively, you can direct setup to other network configuration files by setting either of the following environment variables:",
       netConfigUrlVarName = EnvVarConfigUrl, netConfigFileVarName = EnvVarConfigFile
     raiseAssert("Version not found in network configuration")
 
-  return ArchivistNetwork(
+  return PrometheiNetwork(
     spr: sprs[0],
     rpcs: fullModel.rpcs,
     marketplace:
       fullModel.marketplace.filterIt(it.supportedVersions.contains(selected))[0],
   )
 
-proc getNetworkConfig*(network: string): ArchivistNetwork =
+proc getNetworkConfig*(network: string): PrometheiNetwork =
   let fullModel = fetchModel(network)
   return mapToVersion(fullModel)

@@ -11,8 +11,8 @@ on:
           - devnet
           - testnet
         type: choice
-      archivist_image:
-        description: durabilitylabs/archivist-node:latest-dist-tests
+      promethei_image:
+        description: durabilitylabs/nim-promethei-node:latest-dist-tests
         required: true
         type: string
   workflow_call:
@@ -21,20 +21,20 @@ on:
         description: Network deploy on
         required: true
         type: string
-      archivist_image:
-        description: durabilitylabs/archivist-node:latest-dist-tests
+      promethei_image:
+        description: durabilitylabs/nim-promethei-node:latest-dist-tests
         required: true
         type: string
 
 env:
   NETWORK: ${{ inputs.network }}
   KUBE_VERSION: v1.33.1
-  ARCHIVIST_IMAGE: ${{ inputs.archivist_image }}
-  ARCHIVIST_STORAGE_LABEL: archivist-storage
-  ARCHIVIST_VALIDATOR_LABEL: archivist-validator
-  CONTRACTS_REPOSITORY: archivist-contracts
+  PROMETHEI_IMAGE: ${{ inputs.promethei_image }}
+  PROMETHEI_STORAGE_LABEL: promethei-storage
+  PROMETHEI_VALIDATOR_LABEL: promethei-validator
+  CONTRACTS_REPOSITORY: promethei-contracts
   CONTRACTS_DEPLOYMENT_WORKFLOW: devnet-contracts.yml
-  CONFIG_REPOSITORY: archivist-config
+  CONFIG_REPOSITORY: promethei-config
   CONFIG_REPOSITORY_BRANCH: main
   CONFIG_ENDPOINT: https://config.archivist.storage
 
@@ -56,9 +56,9 @@ jobs:
       - name: Set variables from a Docker image
         run: |
           if [[ ${{ github.event_name }} == 'workflow_dispatch' ]]; then
-            docker pull ${{ env.ARCHIVIST_IMAGE }}
-            echo "ref_sha=$(docker inspect ${{ env.ARCHIVIST_IMAGE }} --format='{{index .Config.Labels "org.opencontainers.image.revision"}}')" >> $GITHUB_ENV
-            echo "image_version=$(docker inspect ${{ env.ARCHIVIST_IMAGE }} --format='{{index .Config.Labels "org.opencontainers.image.version"}}')" >> $GITHUB_ENV
+            docker pull ${{ env.PROMETHEI_IMAGE }}
+            echo "ref_sha=$(docker inspect ${{ env.PROMETHEI_IMAGE }} --format='{{index .Config.Labels "org.opencontainers.image.revision"}}')" >> $GITHUB_ENV
+            echo "image_version=$(docker inspect ${{ env.PROMETHEI_IMAGE }} --format='{{index .Config.Labels "org.opencontainers.image.version"}}')" >> $GITHUB_ENV
           else
             echo "ref_sha=${{ github.sha }}" >> $GITHUB_ENV
           fi
@@ -98,7 +98,7 @@ jobs:
           fi
 
           # Contracts
-          contracts_deployed=$(curl -s ${{ env.CONFIG_ENDPOINT }}/${{ env.NETWORK }}.json | jq -r '.archivist[].contracts')
+          contracts_deployed=$(curl -s ${{ env.CONFIG_ENDPOINT }}/${{ env.NETWORK }}.json | jq -r '.promethei[].contracts')
           contracts_submodule=$(git rev-parse --short HEAD:vendor/${{ env.CONTRACTS_REPOSITORY }})
           echo "contracts_revision=${contracts_submodule}" >> $GITHUB_OUTPUT
           echo "contracts_ref=$(git rev-parse HEAD:vendor/${{ env.CONTRACTS_REPOSITORY }})" >> $GITHUB_OUTPUT
@@ -183,7 +183,7 @@ jobs:
           host: ${{ env.SSH_HOST }}
           username: ${{ secrets[format('{0}_SSH_USERNAME', inputs.network)] }}
           key: ${{ secrets[format('{0}_SSH_KEY', inputs.network)] }}
-          script: ${{ env.ARCHIVIST_IMAGE }}
+          script: ${{ env.PROMETHEI_IMAGE }}
 
   cluster-nodes:
     name: Cluster nodes
@@ -191,7 +191,7 @@ jobs:
     needs: bootstrap-nodes
     if: ${{ !(failure() || cancelled()) }}
     env:
-      ARCHIVIST_NAMESPACE: ${{ secrets[format('{0}_KUBE_NAMESPACE_ARCHIVIST', inputs.network)] }}
+      PROMETHEI_NAMESPACE: ${{ secrets[format('{0}_KUBE_NAMESPACE_PROMETHEI', inputs.network)] }}
     steps:
       - name: Kubectl - Install ${{ env.KUBE_VERSION }}
         uses: azure/setup-kubectl@v4
@@ -207,23 +207,23 @@ jobs:
 
       - name: Storage nodes - Update
         run: |
-          label="app.kubernetes.io/instance=${{ env.ARCHIVIST_STORAGE_LABEL }}"
-          statefulsets=$(kubectl get statefulset -n "${{ env.ARCHIVIST_NAMESPACE }}" -l "${label}" --ignore-not-found --no-headers -o custom-columns=":metadata.name")
+          label="app.kubernetes.io/instance=${{ env.PROMETHEI_STORAGE_LABEL }}"
+          statefulsets=$(kubectl get statefulset -n "${{ env.PROMETHEI_NAMESPACE }}" -l "${label}" --ignore-not-found --no-headers -o custom-columns=":metadata.name")
           echo "storage_nodes=$(wc -w <<< ${statefulsets})" >> $GITHUB_ENV
           for statefulset in ${statefulsets}; do
-            kubectl -n "${{ env.ARCHIVIST_NAMESPACE }}" patch statefulset "${statefulset}" \
-              --patch '{"spec": {"template": {"spec":{"containers":[{"name": "archivist", "image":"${{ env.ARCHIVIST_IMAGE }}"}]}}}}'
+            kubectl -n "${{ env.PROMETHEI_NAMESPACE }}" patch statefulset "${statefulset}" \
+              --patch '{"spec": {"template": {"spec":{"containers":[{"name": "promethei", "image":"${{ env.PROMETHEI_IMAGE }}"}]}}}}'
             sleep 10
           done
 
       - name: Validator nodes - Update
         run: |
-          label="app.kubernetes.io/instance=${{ env.ARCHIVIST_VALIDATOR_LABEL }}"
-          statefulsets=$(kubectl get statefulset -n "${{ env.ARCHIVIST_NAMESPACE }}" -l "${label}" --ignore-not-found --no-headers -o custom-columns=":metadata.name")
+          label="app.kubernetes.io/instance=${{ env.PROMETHEI_VALIDATOR_LABEL }}"
+          statefulsets=$(kubectl get statefulset -n "${{ env.PROMETHEI_NAMESPACE }}" -l "${label}" --ignore-not-found --no-headers -o custom-columns=":metadata.name")
           echo "validator_nodes=$(wc -w <<< ${statefulsets})" >> $GITHUB_ENV
           for statefulset in ${statefulsets}; do
-            kubectl -n "${{ env.ARCHIVIST_NAMESPACE }}" patch statefulset "${statefulset}" \
-              --patch '{"spec": {"template": {"spec":{"containers":[{"name": "archivist", "image":"${{ env.ARCHIVIST_IMAGE }}"}]}}}}'
+            kubectl -n "${{ env.PROMETHEI_NAMESPACE }}" patch statefulset "${statefulset}" \
+              --patch '{"spec": {"template": {"spec":{"containers":[{"name": "promethei", "image":"${{ env.PROMETHEI_IMAGE }}"}]}}}}'
             sleep 10
           done
 
@@ -232,12 +232,12 @@ jobs:
           WAIT=900
           SECONDS=0
           sleep=1
-          pod_prefix="${{ env.ARCHIVIST_STORAGE_LABEL }}"
+          pod_prefix="${{ env.PROMETHEI_STORAGE_LABEL }}"
           if [[ ${{ env.storage_nodes }} -ge 0 ]]; then
             for instance in {1..${{ env.storage_nodes }}}; do
               while (( SECONDS < WAIT )); do
                 pod=${pod_prefix}-${instance}-1
-                phase=$(kubectl get pod "${pod}" -n "${{ env.ARCHIVIST_NAMESPACE }}" -o jsonpath='{.status.phase}')
+                phase=$(kubectl get pod "${pod}" -n "${{ env.PROMETHEI_NAMESPACE }}" -o jsonpath='{.status.phase}')
                 if [[ "${phase}" == "Running" ]]; then
                   echo "Pod ${pod} is in the ${phase} state"
                   break
@@ -258,12 +258,12 @@ jobs:
           WAIT=900
           SECONDS=0
           sleep=1
-          pod_prefix="${{ env.ARCHIVIST_VALIDATOR_LABEL }}"
+          pod_prefix="${{ env.PROMETHEI_VALIDATOR_LABEL }}"
           if [[ ${{ env.validator_nodes }} -ge 0 ]]; then
             for instance in {1..${{ env.validator_nodes }}}; do
               while (( SECONDS < WAIT )); do
                 pod=${pod_prefix}-${instance}-1
-                phase=$(kubectl get pod "${pod}" -n "${{ env.ARCHIVIST_NAMESPACE }}" -o jsonpath='{.status.phase}')
+                phase=$(kubectl get pod "${pod}" -n "${{ env.PROMETHEI_NAMESPACE }}" -o jsonpath='{.status.phase}')
                 if [[ "${phase}" == "Running" ]]; then
                   echo "Pod ${pod} is in the ${phase} state"
                   break
@@ -377,14 +377,14 @@ jobs:
           # .latest
           jq -r '.latest |= "${{ needs.compute-variables.outputs.app_version }}"' "${config}" > "${config_updated}" && rename_config
 
-          # .archivist.version
-          jq -r '.archivist[].version |= "${{ needs.compute-variables.outputs.app_version }}"' "${config}" > "${config_updated}" && rename_config
+          # .promethei.version
+          jq -r '.promethei[].version |= "${{ needs.compute-variables.outputs.app_version }}"' "${config}" > "${config_updated}" && rename_config
 
-          # .archivist.revision
-          jq -r '.archivist[].revision |= "${{ needs.compute-variables.outputs.app_revision }}"' "${config}" > "${config_updated}" && rename_config
+          # .promethei.revision
+          jq -r '.promethei[].revision |= "${{ needs.compute-variables.outputs.app_revision }}"' "${config}" > "${config_updated}" && rename_config
 
-          # .archivist.contracts
-          jq -r '.archivist[].contracts |= "${{ needs.compute-variables.outputs.contracts_revision }}"' "${config}" > "${config_updated}" && rename_config
+          # .promethei.contracts
+          jq -r '.promethei[].contracts |= "${{ needs.compute-variables.outputs.contracts_revision }}"' "${config}" > "${config_updated}" && rename_config
 
           # .sprs
           jq -r '.sprs[].supportedVersions[] |= "${{ needs.compute-variables.outputs.app_version }}"' "${config}" > "${config_updated}" && rename_config
@@ -398,7 +398,7 @@ jobs:
       - name: Commit updated config
         uses: planetscale/ghcommit-action@v0.2.18
         with:
-          commit_message: "chore(${{ env.NETWORK }}): archivist updated\n${{ github.actor }}\n${{ github.ref_type }}: ${{ github.ref_name }}\n${{ github.event_name }}: ${{ github.repository }}\n${{ github.event.head_commit.message || 'triggered manually' }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          commit_message: "chore(${{ env.NETWORK }}): promethei updated\n${{ github.actor }}\n${{ github.ref_type }}: ${{ github.ref_name }}\n${{ github.event_name }}: ${{ github.repository }}\n${{ github.event.head_commit.message || 'triggered manually' }}\n${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           repo: ${{ github.repository_owner }}/${{ env.CONFIG_REPOSITORY }}
           branch: ${{ env.CONFIG_REPOSITORY_BRANCH }}
         env:
@@ -434,7 +434,7 @@ jobs:
           host: ${{ env.SSH_HOST }}
           username: ${{ secrets[format('{0}_SSH_USERNAME', inputs.network)] }}
           key: ${{ secrets[format('{0}_SSH_KEY', inputs.network)] }}
-          script: ${{ env.ARCHIVIST_IMAGE }}
+          script: ${{ env.PROMETHEI_IMAGE }}
 
   notify:
     name: Notify
@@ -489,7 +489,7 @@ jobs:
             - app version:        ${{ needs.compute-variables.outputs.app_version }}
             - app revision:       ${{ needs.compute-variables.outputs.app_revision }}
             - contracts revision: ${{ needs.compute-variables.outputs.contracts_revision }}
-            ${{ env.ARCHIVIST_IMAGE }}
+            ${{ env.PROMETHEI_IMAGE }}
             ```
             ${{ steps.emojify.outputs.status }}
           webhook: ${{ secrets.DISCORD_WEBHOOK }}

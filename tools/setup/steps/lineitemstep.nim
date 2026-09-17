@@ -19,22 +19,22 @@ proc getLineItemQuestions*(): seq[LineQuestion] =
         defaultValue: "[\"/ip4/0.0.0.0/tcp/8070\"]",
       ),
       LineQuestion(
-        description: "Network port used for Archivist node REST API",
+        description: "Network port used for Promethei node REST API",
         key: "api-port",
         defaultValue: "8080",
       ),
       LineQuestion(
-        description: "Storage space limit in bytes that Archivist node can use",
+        description: "Storage space limit in bytes that Promethei node can use",
         key: "storage-quota",
         defaultValue: "21000000000",
       ),
       LineQuestion(
-        description: "Archivist node log file",
+        description: "Promethei node log file",
         key: "logfile",
-        defaultValue: "archivist.log",
+        defaultValue: "promethei.log",
       ),
       LineQuestion(
-        description: "Archivist node logging level",
+        description: "Promethei node logging level",
         key: "log-level",
         defaultValue: "DEBUG",
       ),

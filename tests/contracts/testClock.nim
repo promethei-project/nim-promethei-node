@@ -1,7 +1,7 @@
 import std/times
 import pkg/chronos
 import pkg/ethers
-import archivist/marketplace/contracts/clock
+import promethei/marketplace/contracts/clock
 import ../testbed
 import ../asynctest
 

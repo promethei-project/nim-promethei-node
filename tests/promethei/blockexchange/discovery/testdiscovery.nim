@@ -1,0 +1,413 @@
+import std/sequtils
+import std/sugar
+import std/tables
+
+import pkg/chronos
+import pkg/kvstore
+import pkg/taskpools
+
+import pkg/libp2p/errors
+
+import pkg/promethei/rng
+import pkg/promethei/stores
+import pkg/promethei/blockexchange
+import pkg/promethei/chunker
+import pkg/promethei/manifest
+import pkg/promethei/merkletree
+import pkg/promethei/blocktype as bt
+
+import ../../../asynctest
+import ../../helpers
+import ../../helpers/mockdiscovery
+import ../../examples
+
+suite "Block Advertising and Discovery":
+  let chunker = RandomChunker.new(Rng.instance(), size = 4096, chunkSize = 256)
+
+  var
+    blocks: seq[bt.Block]
+    manifest: Manifest
+    tree: PrometheiTree
+    manifestBlock: bt.Block
+    switch: Switch
+    peerStore: PeerCtxStore
+    blockDiscovery: MockDiscovery
+    discovery: DiscoveryEngine
+    advertiser: Advertiser
+    network: BlockExcNetwork
+    localStore: BlockStore
+    engine: BlockExcEngine
+    pendingBlocks: PendingBlocksManager
+    tp: Taskpool
+
+  setup:
+    while true:
+      let chunk = (await chunker.getBytes()).tryGet()
+      if chunk.len <= 0:
+        break
+
+      blocks.add(bt.Block.new(chunk).tryGet())
+
+    switch = SwitchBuilder
+      .new()
+      .withNoise()
+      .withMplex(5.minutes, 5.minutes)
+      .withTcpTransport({ServerFlags.ReuseAddr})
+      .withAddresses(@[MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet()])
+      .build()
+    blockDiscovery = MockDiscovery.new()
+    network = BlockExcNetwork.new(switch)
+    tp = Taskpool.new(num_threads = 4)
+    localStore = RepoStore.new(
+      SQLiteKVStore.new(SqliteMemory, tp).tryGet(),
+      SQLiteKVStore.new(SqliteMemory, tp).tryGet(),
+    )
+    for blk in blocks:
+      (await localStore.putBlock(blk)).tryGet()
+    peerStore = PeerCtxStore.new()
+    pendingBlocks = PendingBlocksManager.new()
+
+    (manifest, tree) = makeManifestAndTree(blocks).tryGet()
+    manifestBlock =
+      bt.Block.new(manifest.encode().tryGet(), codec = ManifestCodec).tryGet()
+
+    (await localStore.putBlock(manifestBlock)).tryGet()
+
+    discovery = DiscoveryEngine.new(
+      localStore,
+      peerStore,
+      network,
+      blockDiscovery,
+      pendingBlocks,
+      minPeersPerBlock = 1,
+    )
+
+    advertiser = Advertiser.new(localStore, blockDiscovery, minAdvertisePeers = 0)
+
+    engine = BlockExcEngine.new(
+      localStore, network, discovery, advertiser, peerStore, pendingBlocks
+    )
+
+    switch.mount(network)
+
+  teardown:
+    if not engine.isNil:
+      await engine.stop()
+
+    if not switch.isNil:
+      await switch.stop()
+
+    if not localStore.isNil:
+      await localStore.close()
+
+    if not discovery.isNil:
+      await discovery.stop()
+
+    tp.shutdown()
+
+  test "Should discover want list":
+    await engine.start()
+
+    let pendingBlocks = blocks.mapIt(engine.pendingBlocks.getWantHandle(it.cid))
+
+    blockDiscovery.publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ): Future[void] {.async: (raises: [CancelledError]).} =
+      return
+
+    blockDiscovery.findBlockProvidersHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]).} =
+      await engine.resolveBlocks(blocks.filterIt(it.cid == cid))
+
+    await allFuturesThrowing(allFinished(pendingBlocks))
+
+    await engine.stop()
+
+  test "Should advertise trees":
+    let cids = @[manifest.treeCid]
+    var advertised = initTable.collect:
+      for cid in cids:
+        {cid: newFuture[void]()}
+
+    blockDiscovery.publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised.withValue(cid, fut):
+        if not fut[].finished:
+          fut[].complete()
+
+    await engine.start()
+    await allFuturesThrowing(allFinished(toSeq(advertised.values)))
+    await engine.stop()
+
+  test "Should not advertise local blocks":
+    let blockCids = blocks.mapIt(it.cid)
+
+    blockDiscovery.publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      check:
+        cid notin blockCids
+
+    await engine.start()
+    await sleepAsync(3.seconds)
+    await engine.stop()
+
+  test "Should not launch discovery if remote peer has block":
+    let
+      peerId = PeerId.example
+      haves = collect(initTable()):
+        for blk in blocks:
+          {blk.address: Presence(address: blk.address)}
+
+    var peerCtx = BlockExcPeerCtx.new(peerId)
+    peerCtx.blocks = haves
+    engine.peers.add(peerCtx)
+
+    blockDiscovery.findBlockProvidersHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]).} =
+      check false
+
+    await engine.start()
+    let pendingBlocks = blocks.mapIt(engine.pendingBlocks.getWantHandle(it.cid))
+    await engine.pendingBlocks.resolve(
+      blocks.mapIt(BlockDelivery(blk: it, address: it.address))
+    )
+
+    await allFuturesThrowing(allFinished(pendingBlocks))
+
+    await engine.stop()
+
+proc asBlock(m: Manifest): bt.Block =
+  let mdata = m.encode().tryGet()
+  bt.Block.new(data = mdata, codec = ManifestCodec).tryGet()
+
+suite "E2E - Multiple Nodes Discovery":
+  var
+    switch: seq[Switch]
+    blockexc: seq[NetworkStore]
+    manifests: seq[Manifest]
+    mBlocks: seq[bt.Block]
+    trees: seq[PrometheiTree]
+    tp: Taskpool
+
+  setup:
+    tp = Taskpool.new(num_threads = 4)
+
+    for _ in 0 ..< 4:
+      let chunker = RandomChunker.new(Rng.instance(), size = 4096, chunkSize = 256)
+      var blocks = newSeq[bt.Block]()
+      while true:
+        let chunk = (await chunker.getBytes()).tryGet()
+        if chunk.len <= 0:
+          break
+
+        blocks.add(bt.Block.new(chunk).tryGet())
+      let (manifest, tree) = makeManifestAndTree(blocks).tryGet()
+      manifests.add(manifest)
+      mBlocks.add(manifest.asBlock())
+      trees.add(tree)
+
+      let
+        s = SwitchBuilder
+          .new()
+          .withNoise()
+          .withMplex(5.minutes, 5.minutes)
+          .withTcpTransport({ServerFlags.ReuseAddr})
+          .withAddresses(@[MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet()])
+          .build()
+        blockDiscovery = MockDiscovery.new()
+        network = BlockExcNetwork.new(s)
+        localStore = RepoStore.new(
+          SQLiteKVStore.new(SqliteMemory, tp).tryGet(),
+          SQLiteKVStore.new(SqliteMemory, tp).tryGet(),
+        )
+        peerStore = PeerCtxStore.new()
+        pendingBlocks = PendingBlocksManager.new()
+
+        discovery = DiscoveryEngine.new(
+          localStore,
+          peerStore,
+          network,
+          blockDiscovery,
+          pendingBlocks,
+          minPeersPerBlock = 1,
+        )
+
+        advertiser = Advertiser.new(localStore, blockDiscovery, minAdvertisePeers = 0)
+
+        engine = BlockExcEngine.new(
+          localStore, network, discovery, advertiser, peerStore, pendingBlocks
+        )
+        networkStore = NetworkStore.new(engine, localStore)
+
+      s.mount(network)
+      switch.add(s)
+      blockexc.add(networkStore)
+
+  teardown:
+    for bs in blockexc:
+      if not bs.engine.isNil:
+        await bs.engine.stop()
+
+      await bs.close()
+
+    for s in switch:
+      await s.stop()
+
+    if not tp.isNil:
+      tp.shutdown()
+
+    switch = @[]
+    blockexc = @[]
+    manifests = @[]
+    mBlocks = @[]
+    trees = @[]
+
+  test "E2E - Should advertise and discover blocks":
+    # Distribute the manifests and trees amongst 1..3
+    # Ask 0 to download everything without connecting him beforehand
+
+    var advertised: Table[Cid, SignedPeerRecord]
+
+    MockDiscovery(blockexc[1].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[1].peerInfo.signedPeerRecord
+
+    MockDiscovery(blockexc[2].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[2].peerInfo.signedPeerRecord
+
+    MockDiscovery(blockexc[3].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[3].peerInfo.signedPeerRecord
+
+    # Start pendingBlocks on provider nodes before seeding handles
+    for i in 1 .. 3:
+      await blockexc[i].engine.pendingBlocks.start()
+
+    discard blockexc[1].engine.pendingBlocks.getWantHandle(mBlocks[0].cid)
+    await blockexc[1].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[0], address: BlockAddress(leaf: false, cid: mBlocks[0].cid)
+        )
+      ],
+    )
+
+    discard blockexc[2].engine.pendingBlocks.getWantHandle(mBlocks[1].cid)
+    await blockexc[2].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[1], address: BlockAddress(leaf: false, cid: mBlocks[1].cid)
+        )
+      ],
+    )
+
+    discard blockexc[3].engine.pendingBlocks.getWantHandle(mBlocks[2].cid)
+    await blockexc[3].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[2], address: BlockAddress(leaf: false, cid: mBlocks[2].cid)
+        )
+      ],
+    )
+
+    MockDiscovery(blockexc[0].engine.discovery.discovery).findBlockProvidersHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]).} =
+      advertised.withValue(cid, val):
+        result.add(val[])
+
+    await allFuturesThrowing(switch.mapIt(it.start())).wait(10.seconds)
+    await allFuturesThrowing(blockexc.mapIt(it.engine.start())).wait(10.seconds)
+
+    let futs = collect(newSeq):
+      for m in mBlocks[0 .. 2]:
+        blockexc[0].engine.requestDelivery(BlockAddress.init(m.cid)).tryGet()
+
+    await allFutures(futs).wait(10.seconds)
+
+    await allFuturesThrowing(blockexc.mapIt(it.engine.stop())).wait(10.seconds)
+    await allFuturesThrowing(switch.mapIt(it.stop())).wait(10.seconds)
+
+  test "E2E - Should advertise and discover blocks with peers already connected":
+    # Distribute the blocks amongst 1..3
+    # Ask 0 to download everything *WITH* connecting him beforehand
+
+    var advertised: Table[Cid, SignedPeerRecord]
+
+    MockDiscovery(blockexc[1].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[1].peerInfo.signedPeerRecord
+
+    MockDiscovery(blockexc[2].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[2].peerInfo.signedPeerRecord
+
+    MockDiscovery(blockexc[3].engine.discovery.discovery).publishBlockProvideHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ) {.async: (raises: [CancelledError]).} =
+      advertised[cid] = switch[3].peerInfo.signedPeerRecord
+
+    # Start pendingBlocks on provider nodes before seeding handles
+    for i in 1 .. 3:
+      await blockexc[i].engine.pendingBlocks.start()
+
+    discard blockexc[1].engine.pendingBlocks.getWantHandle(mBlocks[0].cid)
+    await blockexc[1].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[0], address: BlockAddress(leaf: false, cid: mBlocks[0].cid)
+        )
+      ],
+    )
+
+    discard blockexc[2].engine.pendingBlocks.getWantHandle(mBlocks[1].cid)
+    await blockexc[2].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[1], address: BlockAddress(leaf: false, cid: mBlocks[1].cid)
+        )
+      ],
+    )
+
+    discard blockexc[3].engine.pendingBlocks.getWantHandle(mBlocks[2].cid)
+    await blockexc[3].engine.blocksDeliveryHandler(
+      switch[0].peerInfo.peerId,
+      @[
+        BlockDelivery(
+          blk: mBlocks[2], address: BlockAddress(leaf: false, cid: mBlocks[2].cid)
+        )
+      ],
+    )
+
+    MockDiscovery(blockexc[0].engine.discovery.discovery).findBlockProvidersHandler = proc(
+        d: MockDiscovery, cid: Cid
+    ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]).} =
+      advertised.withValue(cid, val):
+        return @[val[]]
+
+    await allFuturesThrowing(switch.mapIt(it.start())).wait(10.seconds)
+    await allFuturesThrowing(blockexc.mapIt(it.engine.start())).wait(10.seconds)
+
+    let futs = mBlocks[0 .. 2].mapIt(
+      blockexc[0].engine.requestDelivery(BlockAddress.init(it.cid)).tryGet()
+    )
+
+    await allFutures(futs).wait(10.seconds)
+
+    await allFuturesThrowing(blockexc.mapIt(it.engine.stop())).wait(10.seconds)
+    await allFuturesThrowing(switch.mapIt(it.stop())).wait(10.seconds)
