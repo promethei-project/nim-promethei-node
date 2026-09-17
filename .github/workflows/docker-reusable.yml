@@ -5,12 +5,12 @@ on:
   workflow_call:
     inputs:
       docker_file:
-        default: docker/archivist.Dockerfile
+        default: docker/promethei.Dockerfile
         description: Dockerfile
         required: false
         type: string
       docker_repo:
-        default: durabilitylabs/archivist-node
+        default: durabilitylabs/nim-promethei-node
         description: DockerHub repository
         required: false
         type: string
@@ -62,23 +62,23 @@ on:
         description: Pull policy override for the release-test runner image
         required: false
         type: string
-      release_tests_archivistdockerimage:
-        description: Archivist image override passed to release tests
+      release_tests_prometheidockerimage:
+        description: Promethei image override passed to release tests
         required: false
         type: string
       release_tests_image_pull_policy:
         description: Default pull policy override for release-test child deployments
         required: false
         type: string
-      release_tests_archivist_image_pull_policy:
-        description: Pull policy override for Archivist child deployments
+      release_tests_promethei_image_pull_policy:
+        description: Pull policy override for Promethei child deployments
         required: false
         type: string
-      release_tests_archivist_contracts_image:
+      release_tests_promethei_contracts_image:
         description: Contracts image override passed to release tests
         required: false
         type: string
-      release_tests_archivist_contracts_image_pull_policy:
+      release_tests_promethei_contracts_image_pull_policy:
         description: Pull policy override for contracts child deployments
         required: false
         type: string
@@ -98,19 +98,19 @@ on:
         description: Pull policy override for Prometheus child deployments
         required: false
         type: string
-      release_tests_archivist_discordbot_image:
+      release_tests_promethei_discordbot_image:
         description: Discord bot image override passed to release tests
         required: false
         type: string
-      release_tests_archivist_discordbot_image_pull_policy:
+      release_tests_promethei_discordbot_image_pull_policy:
         description: Pull policy override for Discord bot child deployments
         required: false
         type: string
-      release_tests_archivist_rewarderbot_image:
+      release_tests_promethei_rewarderbot_image:
         description: Rewarder bot image override passed to release tests
         required: false
         type: string
-      release_tests_archivist_rewarderbot_image_pull_policy:
+      release_tests_promethei_rewarderbot_image_pull_policy:
         description: Pull policy override for rewarder bot child deployments
         required: false
         type: string
@@ -119,9 +119,9 @@ on:
         required: false
         type: string
     outputs:
-      archivist_image:
-        description: Archivist Docker image tag
-        value: ${{ jobs.publish.outputs.archivist_image }}
+      promethei_image:
+        description: Promethei Docker image tag
+        value: ${{ jobs.publish.outputs.promethei_image }}
 
 
 env:
@@ -194,7 +194,7 @@ jobs:
         run: |
           # Create contract label for compatible contract image if specified
           if [[ -n "${{ env.CONTRACT_IMAGE }}" ]]; then
-            echo "CONTRACT_LABEL=storage.archivist.archivist-node.blockchain-image=${{ env.CONTRACT_IMAGE }}" >> $GITHUB_ENV
+            echo "CONTRACT_LABEL=storage.promethei.nim-promethei-node.blockchain-image=${{ env.CONTRACT_IMAGE }}" >> $GITHUB_ENV
           fi
 
       - name: Docker - Meta
@@ -248,7 +248,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.meta.outputs.version }}
-      archivist_image: ${{ steps.image_tag.outputs.archivist_image }}
+      promethei_image: ${{ steps.image_tag.outputs.promethei_image }}
     needs: [build, compute]
     steps:
       - name: Docker - Variables
@@ -276,7 +276,7 @@ jobs:
           
           # Create contract label for compatible contract image if specified
           if [[ -n "${{ env.CONTRACT_IMAGE }}" ]]; then
-            echo "CONTRACT_LABEL=storage.archivist.archivist-node.blockchain-image=${{ env.CONTRACT_IMAGE }}" >> $GITHUB_ENV
+            echo "CONTRACT_LABEL=storage.promethei.nim-promethei-node.blockchain-image=${{ env.CONTRACT_IMAGE }}" >> $GITHUB_ENV
           fi
 
       - name: Docker - Download digests
@@ -318,10 +318,10 @@ jobs:
 
       - name: Docker - Image tag
         id: image_tag
-        run: echo "archivist_image=${{ env.DOCKER_REPO }}:${{ steps.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
+        run: echo "promethei_image=${{ env.DOCKER_REPO }}:${{ steps.meta.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Docker - Inspect image
-        run: docker buildx imagetools inspect ${{ steps.image_tag.outputs.archivist_image }}
+        run: docker buildx imagetools inspect ${{ steps.image_tag.outputs.promethei_image }}
 
 
   # Compute Tests inputs
@@ -334,21 +334,21 @@ jobs:
       source: ${{ steps.compute.outputs.source }}
       branch: ${{ steps.compute.outputs.branch }}
       workflow_source: ${{ steps.compute.outputs.workflow_source }}
-      archivistdockerimage: ${{ steps.compute.outputs.archivistdockerimage }}
+      prometheidockerimage: ${{ steps.compute.outputs.prometheidockerimage }}
       runner_image: ${{ steps.compute.outputs.runner_image }}
       runner_image_pull_policy: ${{ steps.compute.outputs.runner_image_pull_policy }}
       image_pull_policy: ${{ steps.compute.outputs.image_pull_policy }}
-      archivist_image_pull_policy: ${{ steps.compute.outputs.archivist_image_pull_policy }}
-      archivist_contracts_image: ${{ steps.compute.outputs.archivist_contracts_image }}
-      archivist_contracts_image_pull_policy: ${{ steps.compute.outputs.archivist_contracts_image_pull_policy }}
+      promethei_image_pull_policy: ${{ steps.compute.outputs.promethei_image_pull_policy }}
+      promethei_contracts_image: ${{ steps.compute.outputs.promethei_contracts_image }}
+      promethei_contracts_image_pull_policy: ${{ steps.compute.outputs.promethei_contracts_image_pull_policy }}
       geth_docker_image: ${{ steps.compute.outputs.geth_docker_image }}
       geth_image_pull_policy: ${{ steps.compute.outputs.geth_image_pull_policy }}
       prometheus_docker_image: ${{ steps.compute.outputs.prometheus_docker_image }}
       prometheus_image_pull_policy: ${{ steps.compute.outputs.prometheus_image_pull_policy }}
-      archivist_discordbot_image: ${{ steps.compute.outputs.archivist_discordbot_image }}
-      archivist_discordbot_image_pull_policy: ${{ steps.compute.outputs.archivist_discordbot_image_pull_policy }}
-      archivist_rewarderbot_image: ${{ steps.compute.outputs.archivist_rewarderbot_image }}
-      archivist_rewarderbot_image_pull_policy: ${{ steps.compute.outputs.archivist_rewarderbot_image_pull_policy }}
+      promethei_discordbot_image: ${{ steps.compute.outputs.promethei_discordbot_image }}
+      promethei_discordbot_image_pull_policy: ${{ steps.compute.outputs.promethei_discordbot_image_pull_policy }}
+      promethei_rewarderbot_image: ${{ steps.compute.outputs.promethei_rewarderbot_image }}
+      promethei_rewarderbot_image_pull_policy: ${{ steps.compute.outputs.promethei_rewarderbot_image_pull_policy }}
     steps:
       - name: Compute Tests inputs
         id: compute
@@ -360,30 +360,30 @@ jobs:
             printf '%s' "$value"
           }
 
-          release_tests_archivistdockerimage="$(trim "${{ inputs.release_tests_archivistdockerimage }}")"
+          release_tests_prometheidockerimage="$(trim "${{ inputs.release_tests_prometheidockerimage }}")"
 
-          echo "source=https://github.com/durability-labs/cs-archivist-dist-tests" >> "$GITHUB_OUTPUT"
+          echo "source=https://github.com/promethei-project/cs-promethei-dist-tests" >> "$GITHUB_OUTPUT"
           echo "branch=main" >> "$GITHUB_OUTPUT"
-          echo "workflow_source=durability-labs/cs-archivist-dist-tests" >> "$GITHUB_OUTPUT"
-          if [[ -n "${release_tests_archivistdockerimage}" ]]; then
-            echo "archivistdockerimage=${release_tests_archivistdockerimage}" >> "$GITHUB_OUTPUT"
+          echo "workflow_source=promethei-project/cs-promethei-dist-tests" >> "$GITHUB_OUTPUT"
+          if [[ -n "${release_tests_prometheidockerimage}" ]]; then
+            echo "prometheidockerimage=${release_tests_prometheidockerimage}" >> "$GITHUB_OUTPUT"
           else
-            echo "archivistdockerimage=${{ inputs.docker_repo }}:${{ needs.publish.outputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "prometheidockerimage=${{ inputs.docker_repo }}:${{ needs.publish.outputs.version }}" >> "$GITHUB_OUTPUT"
           fi
           echo "runner_image=${{ inputs.release_tests_runner_image }}" >> "$GITHUB_OUTPUT"
           echo "runner_image_pull_policy=${{ inputs.release_tests_runner_image_pull_policy }}" >> "$GITHUB_OUTPUT"
           echo "image_pull_policy=${{ inputs.release_tests_image_pull_policy }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_image_pull_policy=${{ inputs.release_tests_archivist_image_pull_policy }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_contracts_image=${{ inputs.release_tests_archivist_contracts_image }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_contracts_image_pull_policy=${{ inputs.release_tests_archivist_contracts_image_pull_policy }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_image_pull_policy=${{ inputs.release_tests_promethei_image_pull_policy }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_contracts_image=${{ inputs.release_tests_promethei_contracts_image }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_contracts_image_pull_policy=${{ inputs.release_tests_promethei_contracts_image_pull_policy }}" >> "$GITHUB_OUTPUT"
           echo "geth_docker_image=${{ inputs.release_tests_geth_docker_image }}" >> "$GITHUB_OUTPUT"
           echo "geth_image_pull_policy=${{ inputs.release_tests_geth_image_pull_policy }}" >> "$GITHUB_OUTPUT"
           echo "prometheus_docker_image=${{ inputs.release_tests_prometheus_docker_image }}" >> "$GITHUB_OUTPUT"
           echo "prometheus_image_pull_policy=${{ inputs.release_tests_prometheus_image_pull_policy }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_discordbot_image=${{ inputs.release_tests_archivist_discordbot_image }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_discordbot_image_pull_policy=${{ inputs.release_tests_archivist_discordbot_image_pull_policy }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_rewarderbot_image=${{ inputs.release_tests_archivist_rewarderbot_image }}" >> "$GITHUB_OUTPUT"
-          echo "archivist_rewarderbot_image_pull_policy=${{ inputs.release_tests_archivist_rewarderbot_image_pull_policy }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_discordbot_image=${{ inputs.release_tests_promethei_discordbot_image }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_discordbot_image_pull_policy=${{ inputs.release_tests_promethei_discordbot_image_pull_policy }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_rewarderbot_image=${{ inputs.release_tests_promethei_rewarderbot_image }}" >> "$GITHUB_OUTPUT"
+          echo "promethei_rewarderbot_image_pull_policy=${{ inputs.release_tests_promethei_rewarderbot_image_pull_policy }}" >> "$GITHUB_OUTPUT"
 
 
   # Run Release Tests
@@ -391,25 +391,25 @@ jobs:
     name: Run Release Tests
     needs: [publish, compute-tests-inputs]
     if: ${{ inputs.run_release_tests == 'true' }}
-    uses: durability-labs/cs-archivist-dist-tests/.github/workflows/run-release-tests.yaml@main
+    uses: promethei-project/cs-promethei-dist-tests/.github/workflows/run-release-tests.yaml@main
     with:
       source: ${{ needs.compute-tests-inputs.outputs.source }}
       branch: ${{ needs.compute-tests-inputs.outputs.branch }}
       runner_image: ${{ needs.compute-tests-inputs.outputs.runner_image }}
       runner_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.runner_image_pull_policy }}
       image_pull_policy: ${{ needs.compute-tests-inputs.outputs.image_pull_policy }}
-      archivistdockerimage: ${{ needs.compute-tests-inputs.outputs.archivistdockerimage }}
-      archivist_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.archivist_image_pull_policy }}
-      archivist_contracts_image: ${{ needs.compute-tests-inputs.outputs.archivist_contracts_image }}
-      archivist_contracts_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.archivist_contracts_image_pull_policy }}
+      prometheidockerimage: ${{ needs.compute-tests-inputs.outputs.prometheidockerimage }}
+      promethei_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.promethei_image_pull_policy }}
+      promethei_contracts_image: ${{ needs.compute-tests-inputs.outputs.promethei_contracts_image }}
+      promethei_contracts_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.promethei_contracts_image_pull_policy }}
       geth_docker_image: ${{ needs.compute-tests-inputs.outputs.geth_docker_image }}
       geth_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.geth_image_pull_policy }}
       prometheus_docker_image: ${{ needs.compute-tests-inputs.outputs.prometheus_docker_image }}
       prometheus_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.prometheus_image_pull_policy }}
-      archivist_discordbot_image: ${{ needs.compute-tests-inputs.outputs.archivist_discordbot_image }}
-      archivist_discordbot_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.archivist_discordbot_image_pull_policy }}
-      archivist_rewarderbot_image: ${{ needs.compute-tests-inputs.outputs.archivist_rewarderbot_image }}
-      archivist_rewarderbot_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.archivist_rewarderbot_image_pull_policy }}
+      promethei_discordbot_image: ${{ needs.compute-tests-inputs.outputs.promethei_discordbot_image }}
+      promethei_discordbot_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.promethei_discordbot_image_pull_policy }}
+      promethei_rewarderbot_image: ${{ needs.compute-tests-inputs.outputs.promethei_rewarderbot_image }}
+      promethei_rewarderbot_image_pull_policy: ${{ needs.compute-tests-inputs.outputs.promethei_rewarderbot_image_pull_policy }}
       workflow_source: ${{ needs.compute-tests-inputs.outputs.workflow_source }}
       namespace: ${{ inputs.release_tests_namespace || 'devnet' }}
     secrets:

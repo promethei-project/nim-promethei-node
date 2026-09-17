@@ -33,33 +33,33 @@ proc getNatQuestion*(): ChoiceQuestion =
         ChoiceOption(
           title: "Any",
           description:
-            @["The Archivist node may attempt any method to perform NAT traversal."],
+            @["The Promethei node may attempt any method to perform NAT traversal."],
           warning: "",
           action: setNatAny,
         ),
         ChoiceOption(
           title: "None",
           description:
-            @["The Archivist node will not attempt to perform NAT traversal."],
+            @["The Promethei node will not attempt to perform NAT traversal."],
           warning: "",
           action: setNatNone,
         ),
         ChoiceOption(
           title: "uPNP",
-          description: @["The Archivist node will attempt to use only uPNP."],
+          description: @["The Promethei node will attempt to use only uPNP."],
           warning: "",
           action: setNatUpnp,
         ),
         ChoiceOption(
           title: "PMP",
-          description: @["The Archivist node will attempt to use only PMP."],
+          description: @["The Promethei node will attempt to use only PMP."],
           warning: "",
           action: setNatPmp,
         ),
         ChoiceOption(
           title: "extIP",
-          description: @["The Archivist node will use your external IP address."],
-          warning: "Setup connects to Durability-Labs server to find your external IP",
+          description: @["The Promethei node will use your external IP address."],
+          warning: "Setup connects to Promethei-Project server to find your external IP",
           action: setNatExtIp,
         ),
         ChoiceOption(

@@ -1,6 +1,6 @@
 # Docker Image
 
- We provide pre-built docker images and they are stored in the [TODO](https://hub.docker.com/repository/docker/TODO/archivist) repository.
+ We provide pre-built docker images and they are stored in the [TODO](https://hub.docker.com/repository/docker/TODO/promethei) repository.
 
 
 ## Run
@@ -8,10 +8,10 @@
  We can run the Docker image using CLI
  ```shell
  # Default run
- docker run --rm archivist
+ docker run --rm promethei
 
  # Mount local datadir
- docker run -v ./datadir:/datadir --rm archivist archivist --data-dir=/datadir
+ docker run -v ./datadir:/datadir --rm promethei promethei --data-dir=/datadir
  ```
 
  And Docker Compose
@@ -23,15 +23,15 @@
 
 ## Arguments
 
- Docker image is based on the [archivist.Dockerfile](archivist.Dockerfile) and there is
+ Docker image is based on the [promethei.Dockerfile](promethei.Dockerfile) and there is
   ```
   ENTRYPOINT ["/docker-entrypoint.sh"]
   CMD ["ddnenode"]
   ```
 
- It means that at the image run it will just run `archivist` application without any arguments and we can pass them as a regular arguments, by overriding command
+ It means that at the image run it will just run `promethei` application without any arguments and we can pass them as a regular arguments, by overriding command
  ```shell
- docker run archivist archivist --api-bindaddr=0.0.0.0 --api-port=8080
+ docker run promethei promethei --api-bindaddr=0.0.0.0 --api-port=8080
  ```
 
 
@@ -42,16 +42,16 @@
  We also added a temporary environment variable `NAT_IP_AUTO` to the entrypoint which is set as `false` for releases and ` true` for regular builds. That approach is useful for Dist-Tests.
  ```shell
  # Disable NAT_IP_AUTO for regular builds
- docker run -e NAT_IP_AUTO=false archivist
+ docker run -e NAT_IP_AUTO=false promethei
  ```
 
 
 ## Slim
- 1. Build the image using `docker build -t archivistsetup:latest -f archivist.Dockerfile ..`
+ 1. Build the image using `docker build -t prometheisetup:latest -f promethei.Dockerfile ..`
  2. The docker image can then be minified using [slim](https://github.com/slimtoolkit/slim). Install slim on your path and then run:
     ```shell
     slim # brings up interactive prompt
-    >>> build --target archivistsetup --http-probe-off true
+    >>> build --target prometheisetup --http-probe-off true
     ```
- 3. This should output an image with name `archivistsetup.slim`
+ 3. This should output an image with name `prometheisetup.slim`
  4. We can then bring up the image using `docker-compose up -d`.

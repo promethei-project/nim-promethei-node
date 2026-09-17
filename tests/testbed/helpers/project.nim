@@ -4,5 +4,5 @@ const projectRoot* = currentSourcePath().parentDir().parentDir().parentDir().par
 
 const projectLogDir* = projectRoot / "logs"
 const projectBuildDir* = projectRoot / "build"
-const hardhatDir* = projectRoot / "vendor" / "archivist-contracts"
+const hardhatDir* = projectRoot / "vendor" / "promethei-contracts"
 const hardhatBinDir* = hardhatDir / "node_modules" / ".bin"
