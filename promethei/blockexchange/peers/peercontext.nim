@@ -256,8 +256,8 @@ proc recordFailure*(self: BlockExcPeerCtx, cid: Cid, isValidation: bool = false)
   if not wasOpen and score.circuitOpen:
     trace "Peer circuit breaker tripped for dataset",
       peer = self.id, cid, failures = score.consecutiveFailures
-    archivist_block_exchange_peer_circuit_open.inc(labelValues = [$self.id])
-    archivist_block_exchange_peer_circuit_breaker_trips.inc(labelValues = [$self.id])
+    promethei_block_exchange_peer_circuit_open.inc(labelValues = [$self.id])
+    promethei_block_exchange_peer_circuit_breaker_trips.inc(labelValues = [$self.id])
 
 proc sendBatchFailure*(self: BlockExcPeerCtx, cid: Cid) =
   var score = self.ensureScoreFor(cid)
@@ -266,8 +266,8 @@ proc sendBatchFailure*(self: BlockExcPeerCtx, cid: Cid) =
   if not wasOpen and score.circuitOpen:
     trace "Peer circuit breaker tripped for dataset (batch)",
       peer = self.id, cid, failures = score.consecutiveFailures
-    archivist_block_exchange_peer_circuit_open.inc(labelValues = [$self.id])
-    archivist_block_exchange_peer_circuit_breaker_trips.inc(labelValues = [$self.id])
+    promethei_block_exchange_peer_circuit_open.inc(labelValues = [$self.id])
+    promethei_block_exchange_peer_circuit_breaker_trips.inc(labelValues = [$self.id])
 
 proc isBlockRequested*(self: BlockExcPeerCtx, address: BlockAddress): bool =
   address in self.blocksRequested

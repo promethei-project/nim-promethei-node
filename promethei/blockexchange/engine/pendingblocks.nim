@@ -145,7 +145,7 @@ proc recordRetryOutcome*(self: PendingBlocksManager, addresses: seq[BlockAddress
   for address in addresses:
     if req =? self.blocks .? [address]:
       let durationUs = (now - req.startTime) div 1000
-      archivist_block_exchange_request_outcome_duration_seconds.observe(
+      promethei_block_exchange_request_outcome_duration_seconds.observe(
         durationUs.float64 / 1_000_000, labelValues = ["retried"]
       )
 
@@ -281,13 +281,13 @@ proc releaseWantHandle(
   req.owners.excl(wrapped)
   if req.owners.len == 0 and not req.handle.finished:
     warn "Abandoning block", address
-    archivist_block_exchange_requests_abandoned.inc()
+    promethei_block_exchange_requests_abandoned.inc()
     let now = getMonoTime().ticks
     let durationUs = (now - req.startTime) div 1000
-    archivist_block_exchange_request_outcome_duration_seconds.observe(
+    promethei_block_exchange_request_outcome_duration_seconds.observe(
       durationUs.float64 / 1_000_000, labelValues = ["abandoned"]
     )
-    archivist_block_exchange_handles_failed.inc()
+    promethei_block_exchange_handles_failed.inc()
 
     req.handle.fail(
       newException(RequestAbandonedEngineError, fmt"Abandoning block {address}")
@@ -448,11 +448,11 @@ proc failWantHandle*(
     if not blockReq.handle.finished:
       let err = (ref errType)(address: address, msg: msg)
       blockReq.handle.fail(err)
-      archivist_block_exchange_handles_failed.inc()
-      archivist_block_exchange_requests_failed.inc()
+      promethei_block_exchange_handles_failed.inc()
+      promethei_block_exchange_requests_failed.inc()
       let now = getMonoTime().ticks
       let durationUs = (now - blockReq.startTime) div 1000
-      archivist_block_exchange_request_outcome_duration_seconds.observe(
+      promethei_block_exchange_request_outcome_duration_seconds.observe(
         durationUs.float64 / 1_000_000, labelValues = ["failed"]
       )
       self.failOwners(address, err)
