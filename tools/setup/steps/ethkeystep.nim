@@ -7,13 +7,13 @@ proc genNewKey(app: App) =
     addressFile = "eth.address"
 
   app.createNewEthKeyfile(privKey, addressFile)
-  app.writeConfigLine("# Archivist node private key:")
+  app.writeConfigLine("# Promethei node private key:")
   app.writeConfigLine("eth-private-key=" & privKey)
   app.writeConfigLine("# Public key saved to: " & addressFile & "\n")
 
 proc writeExample(app: App) =
-  app.writeConfigLine("# example Archivist node private key:")
-  app.writeConfigLine("# eth-private-key=archivist_ethereum.key\n")
+  app.writeConfigLine("# example Promethei node private key:")
+  app.writeConfigLine("# eth-private-key=promethei_ethereum.key\n")
 
 proc getEthKeyQuestion*(): ChoiceQuestion =
   return ChoiceQuestion(
@@ -25,7 +25,7 @@ proc getEthKeyQuestion*(): ChoiceQuestion =
           description:
             @[
               "Generates a new private-key file and adds it to",
-              "the Archivist node configuration.",
+              "the Promethei node configuration.",
             ],
           warning: "",
           action: genNewKey,

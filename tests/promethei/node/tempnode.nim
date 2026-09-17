@@ -1,0 +1,110 @@
+import pkg/chronos
+import pkg/questionable/results
+import pkg/libp2p/builders
+import pkg/taskpools
+import pkg/kvstore
+import pkg/promethei/discovery
+import pkg/promethei/stores
+import pkg/promethei/blockexchange
+import pkg/promethei/node
+import pkg/promethei/clock
+import pkg/promethei/systemclock
+
+type TemporaryNode* = ref object
+  repoDs: KVStore
+  metaDs: KVStore
+  discoveryDs: KVStore
+  tp: Taskpool
+  localStore: RepoStore
+  p2p: Switch
+  peerStore: PeerCtxStore
+  exchangeNetwork: BlockExcNetwork
+  discoveryNetwork: Discovery
+  pendingBlocks: PendingBlocksManager
+  discoveryEngine: DiscoveryEngine
+  exchangeEngine: BlockExcEngine
+  networkStore: NetworkStore
+  node: PrometheiNodeRef
+
+proc initializeLocalStore(temporary: TemporaryNode, clock: Clock = SystemClock.new()) =
+  temporary.tp = Taskpool.new(num_threads = 4)
+  temporary.repoDs = SQLiteKVStore.new(SqliteMemory, temporary.tp).tryGet()
+  temporary.metaDs = SQLiteKVStore.new(SqliteMemory, temporary.tp).tryGet()
+  temporary.localStore =
+    RepoStore.new(temporary.repoDs, temporary.metaDs, clock = clock)
+
+proc initializeNetwork(temporary: TemporaryNode) =
+  temporary.p2p = SwitchBuilder
+    .new()
+    .withNoise()
+    .withMplex(5.minutes, 5.minutes)
+    .withTcpTransport()
+    .withAddresses(@[MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet()])
+    .build()
+  temporary.peerStore = PeerCtxStore.new()
+  temporary.exchangeNetwork = BlockExcnetwork.new(temporary.p2p)
+  let privateKey = temporary.p2p.peerInfo.privateKey
+  let address = MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet()
+  temporary.discoveryDs = SQLiteKVStore.new(SqliteMemory, temporary.tp).tryGet()
+  temporary.discoveryNetwork =
+    Discovery.new(privateKey, announceAddrs = @[address], store = temporary.discoveryDs)
+
+proc initializePendingBlocks(temporary: TemporaryNode) =
+  temporary.pendingBlocks = PendingBlocksManager.new()
+
+proc initializeDiscovery(temporary: TemporaryNode) =
+  temporary.discoveryEngine = DiscoveryEngine.new(
+    temporary.localStore, temporary.peerStore, temporary.exchangeNetwork,
+    temporary.discoveryNetwork, temporary.pendingBlocks,
+  )
+
+proc initializeBlockExchange(temporary: TemporaryNode) =
+  let advertiser = Advertiser.new(temporary.localStore, temporary.discoveryNetwork)
+  temporary.exchangeEngine = BlockExcEngine.new(
+    temporary.localStore, temporary.exchangeNetwork, temporary.discoveryEngine,
+    advertiser, temporary.peerStore, temporary.pendingBlocks,
+  )
+
+proc initializeNetworkStore(temporary: TemporaryNode) =
+  temporary.networkStore =
+    NetworkStore.new(temporary.exchangeEngine, temporary.localStore)
+
+proc initializeNode(temporary: TemporaryNode) =
+  temporary.node = PrometheiNodeRef.new(
+    temporary.p2p,
+    temporary.networkStore,
+    temporary.localStore,
+    temporary.exchangeEngine,
+    temporary.discoveryNetwork,
+    Taskpool.new(),
+  )
+
+proc create*(
+    _: type TemporaryNode, clock: Clock = SystemClock.new()
+): Future[TemporaryNode] {.async.} =
+  let temporary = TemporaryNode()
+  temporary.initializeLocalStore(clock)
+  temporary.initializeNetwork()
+  temporary.initializePendingBlocks()
+  temporary.initializeDiscovery()
+  temporary.initializeBlockExchange()
+  temporary.initializeNetworkStore()
+  temporary.initializeNode()
+  await temporary.node.start()
+  temporary
+
+proc destroy*(temporary: TemporaryNode) {.async.} =
+  await temporary.node.stop()
+  (await temporary.repoDs.close()).tryGet()
+  (await temporary.metaDs.close()).tryGet()
+  (await temporary.discoveryDs.close()).tryGet()
+  temporary.tp.shutdown()
+
+func node*(temporary: TemporaryNode): PrometheiNodeRef =
+  temporary.node
+
+func localStore*(temporary: TemporaryNode): RepoStore =
+  temporary.localStore
+
+func networkStore*(temporary: TemporaryNode): NetworkStore =
+  temporary.networkStore

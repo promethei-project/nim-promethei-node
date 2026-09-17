@@ -38,7 +38,7 @@ proc writeExample(app: App) =
 
 proc getNetworkQuestion*(): ChoiceQuestion =
   let networkWarning =
-    "Setup will use Durability-Labs server to fetch network information."
+    "Setup will use Promethei-Project server to fetch network information."
   return ChoiceQuestion(
     title: "Choose a network",
     options:
@@ -47,7 +47,7 @@ proc getNetworkQuestion*(): ChoiceQuestion =
           title: "Mainnet",
           description:
             @[
-              "Archivist mainnet where durable data storage is traded",
+              "Promethei mainnet where durable data storage is traded",
               "using tokens with real monetary value.",
             ],
           warning: networkWarning,
@@ -57,7 +57,7 @@ proc getNetworkQuestion*(): ChoiceQuestion =
           title: "Testnet",
           description:
             @[
-              "Network for testing new Archivist versions before",
+              "Network for testing new Promethei versions before",
               "they launch on mainnet. Tokens used hold no real value.",
               "Ideal for testing new node installations.",
             ],
@@ -68,7 +68,7 @@ proc getNetworkQuestion*(): ChoiceQuestion =
           title: "Devnet",
           description:
             @[
-              "Unstable network used for development of Archivist.",
+              "Unstable network used for development of Promethei.",
               "Tokens used hold no real value.",
             ],
           warning: networkWarning,

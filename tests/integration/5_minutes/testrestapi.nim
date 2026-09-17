@@ -22,4 +22,4 @@ suite "REST API":
     check info1["announceAddresses"] != info2["announceAddresses"]
 
   test "nodes can set chronicles log level":
-    await testbed.api(node1).setLogLevel("DEBUG;TRACE:archivist")
+    await testbed.api(node1).setLogLevel("DEBUG;TRACE:promethei")

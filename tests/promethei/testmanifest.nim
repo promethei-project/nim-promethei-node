@@ -1,0 +1,147 @@
+import pkg/chronos
+import pkg/questionable/results
+import pkg/promethei/chunker
+import pkg/promethei/blocktype as bt
+import pkg/promethei/manifest
+import pkg/poseidon2
+
+import pkg/promethei/slots
+import pkg/promethei/merkletree
+import pkg/promethei/indexingstrategy
+
+import ../asynctest
+import ./helpers
+import ./examples
+
+suite "Manifest":
+  let
+    manifest =
+      Manifest.new(treeCid = Cid.example, blockSize = 1.MiBs, datasetSize = 100.MiBs)
+
+    protectedManifest = Manifest.new(
+      manifest = manifest,
+      treeCid = Cid.example,
+      datasetSize = 200.MiBs,
+      eck = 2,
+      ecM = 2,
+      strategy = SteppedStrategy,
+    )
+
+    leaves = [
+      0.toF.Poseidon2Hash, 1.toF.Poseidon2Hash, 2.toF.Poseidon2Hash, 3.toF.Poseidon2Hash
+    ]
+
+    slotLeavesCids = leaves.toSlotCids().tryGet
+
+    tree = Poseidon2Tree.init(leaves).tryGet
+    verifyCid = tree.root.tryGet.toVerifyCid().tryGet
+
+    verifiableManifest = Manifest
+      .new(
+        manifest = protectedManifest, verifyRoot = verifyCid, slotRoots = slotLeavesCids
+      )
+      .tryGet()
+
+  proc encodeDecode(manifest: Manifest): Manifest =
+    let e = manifest.encode().tryGet()
+    Manifest.decode(e).tryGet()
+
+  test "Should encode/decode to/from base manifest":
+    check:
+      encodeDecode(manifest) == manifest
+
+  test "Should encode/decode large manifest":
+    let large = Manifest.new(
+      treeCid = Cid.example,
+      blockSize = (64 * 1024).NBytes,
+      datasetSize = (5 * 1024).MiBs,
+    )
+
+    check:
+      encodeDecode(large) == large
+
+  test "Should encode/decode to/from protected manifest":
+    check:
+      encodeDecode(protectedManifest) == protectedManifest
+
+  test "Should encode/decode to/from verifiable manifest":
+    check:
+      encodeDecode(verifiableManifest) == verifiableManifest
+
+suite "Manifest - Attribute Inheritance":
+  proc makeProtectedManifest(strategy: StrategyType): Manifest =
+    Manifest.new(
+      manifest = Manifest.new(
+        treeCid = Cid.example,
+        blockSize = 1.MiBs,
+        datasetSize = 5.MiBs,
+        filename = "example.png".some,
+        mimetype = "image/png".some,
+      ),
+      treeCid = Cid.example,
+      datasetSize = 10.MiBs,
+      ecK = 1,
+      ecM = 1,
+      strategy = strategy,
+    )
+
+  test "Should preserve interleaving strategy for protected manifest in verifiable manifest":
+    var verifiable = Manifest
+      .new(
+        manifest = makeProtectedManifest(SteppedStrategy),
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    check verifiable.protectedStrategy == SteppedStrategy
+
+    verifiable = Manifest
+      .new(
+        manifest = makeProtectedManifest(LinearStrategy),
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    check verifiable.protectedStrategy == LinearStrategy
+
+  test "Should preserve metadata for manifest in verifiable manifest":
+    var verifiable = Manifest
+      .new(
+        manifest = makeProtectedManifest(SteppedStrategy),
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    check verifiable.filename.isSome == true
+    check !verifiable.filename == "example.png"
+    check verifiable.mimetype.isSome == true
+    check !verifiable.mimetype == "image/png"
+
+  test "Can provide slot block iterator for verifiable manifest":
+    var verifiable = Manifest
+      .new(
+        manifest = makeProtectedManifest(SteppedStrategy),
+        verifyRoot = Cid.example,
+        slotRoots = @[Cid.example, Cid.example],
+      )
+      .tryGet()
+
+    let iter0 = verifiable.getSlotBlockIterator(0).tryGet()
+    let iter1 = verifiable.getSlotBlockIterator(1).tryGet()
+    check:
+      iter0.next() == 0
+      iter0.next() == 1
+      iter0.next() == 2
+      iter0.next() == 3
+      iter0.next() == 4
+      iter0.finished
+
+      iter1.next() == 5
+      iter1.next() == 6
+      iter1.next() == 7
+      iter1.next() == 8
+      iter1.next() == 9
+      iter1.finished

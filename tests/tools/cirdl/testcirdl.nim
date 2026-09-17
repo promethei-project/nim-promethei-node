@@ -1,7 +1,7 @@
 import std/os
 import std/osproc
 import pkg/chronos
-import pkg/archivist/marketplace/contracts
+import pkg/promethei/marketplace/contracts
 import ../../asynctest
 import ../../testbed
 

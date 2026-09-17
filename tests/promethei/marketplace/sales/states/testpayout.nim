@@ -1,0 +1,44 @@
+import pkg/questionable
+import pkg/chronos
+import pkg/promethei/marketplace/contracts/requests
+import pkg/promethei/marketplace/sales/states/payout
+import pkg/promethei/marketplace/sales/states/finished
+import pkg/promethei/marketplace/sales/salesagent
+import pkg/promethei/marketplace/sales/salescontext
+import pkg/promethei/marketplace/abstractmarketplace
+
+import ../../../../asynctest
+import ../../../examples
+import ../../../helpers
+import ../../../helpers/mockmarketplace
+import ../../../helpers/mockclock
+
+asyncchecksuite "sales state 'payout'":
+  let request = StorageRequest.example
+  let slotIndex = request.ask.slots div 2
+  let slot = Slot(request: request, slotIndex: slotIndex)
+  let clock = MockClock.new()
+
+  let currentCollateral = Tokens.example
+
+  var marketplace: MockMarketplace
+  var state: SalePayout
+  var agent: SalesAgent
+
+  setup:
+    marketplace = MockMarketplace.new()
+
+    let context = SalesContext(marketplace: marketplace, clock: clock)
+    agent = newSalesAgent(context, SlotInfo.init(slot.id))
+    state = SalePayout.new()
+
+  test "switches to 'finished' state":
+    marketplace.fillSlot(
+      requestId = request.id,
+      slotIndex = slotIndex,
+      proof = Groth16Proof.default,
+      host = Address.example,
+      collateral = currentCollateral,
+    )
+    let next = await state.run(agent)
+    check !next of SaleFinished
