@@ -18,7 +18,7 @@ import pkg/libp2p/[cid, multicodec, routing_record, signed_envelope]
 import pkg/questionable
 import pkg/questionable/results
 import pkg/contractabi/address as ca
-import pkg/kvstore
+import pkg/datastore
 import pkg/prometheidht/discv5/[routing_table, protocol as discv5]
 from pkg/nimcrypto import keccak256
 
@@ -35,10 +35,6 @@ export discv5
 logScope:
   topics = "promethei discovery"
 
-const
-  DefaultDhtRefreshCooldown* = 5.seconds
-  DefaultDhtMinPeers* = BUCKET_SIZE
-
 type Discovery* = ref object of RootObj
   protocol*: discv5.Protocol # dht protocol
   key: PrivateKey # private key
@@ -48,10 +44,6 @@ type Discovery* = ref object of RootObj
     # record to advertice node connection information, this carry any
     # address that the node can be connected on
   dhtRecord*: ?SignedPeerRecord # record to advertice DHT connection information
-  lastDhtRefreshAt: Moment # Cooldown timestamp for dht refresh
-  refreshRoutingTableFut: Future[void].Raising([]) # Tracked background refresh task
-
-proc ensureDhtPopulated*(d: Discovery) {.gcsafe.}
 
 proc toNodeId*(cid: Cid): NodeId =
   ## Cid to discovery id
@@ -73,7 +65,6 @@ proc findPeer*(
   ##
 
   try:
-    d.ensureDhtPopulated()
     let node = await d.protocol.resolve(toNodeId(peerId))
 
     return
@@ -96,7 +87,6 @@ method find*(
   ##
 
   try:
-    d.ensureDhtPopulated()
     without providers =? (await d.protocol.getProviders(cid.toNodeId())).mapFailure,
       error:
       warn "Error finding providers for block", cid, error = error.msg
@@ -112,7 +102,6 @@ method provide*(d: Discovery, cid: Cid) {.async: (raises: [CancelledError]), bas
   ## Provide a block Cid
   ##
   try:
-    d.ensureDhtPopulated()
     let nodes = await d.protocol.addProvider(cid.toNodeId(), d.providerRecord.get)
 
     if nodes.len <= 0:
@@ -123,44 +112,6 @@ method provide*(d: Discovery, cid: Cid) {.async: (raises: [CancelledError]), bas
   except CatchableError as exc:
     warn "Error providing block", cid, exc = exc.msg
 
-proc nodesDiscovered*(d: Discovery): int =
-  if d.protocol.isNil:
-    return 0
-
-  d.protocol.nodesDiscovered()
-
-proc refreshRoutingTable*(
-    d: Discovery
-): Future[int] {.async: (raises: [CancelledError]).} =
-  if d.protocol.isNil:
-    return 0
-
-  try:
-    discard await d.protocol.queryRandom()
-  except CatchableError as exc:
-    trace "Routing table refresh failed", exc = exc.msg
-
-  d.nodesDiscovered()
-
-proc refreshRoutingTableBackground(d: Discovery) {.async: (raises: []).} =
-  try:
-    discard await d.refreshRoutingTable()
-  except CatchableError as exc:
-    trace "Background routing table refresh failed", exc = exc.msg
-
-proc ensureDhtPopulated*(d: Discovery) {.gcsafe.} =
-  if not d.refreshRoutingTableFut.isNil and not d.refreshRoutingTableFut.finished:
-    return
-
-  if (Moment.now() - d.lastDhtRefreshAt) < DefaultDhtRefreshCooldown:
-    return
-
-  if d.nodesDiscovered() >= DefaultDhtMinPeers:
-    return
-
-  d.lastDhtRefreshAt = Moment.now()
-  d.refreshRoutingTableFut = refreshRoutingTableBackground(d)
-
 method find*(
     d: Discovery, host: ca.Address
 ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]), base.} =
@@ -169,7 +120,6 @@ method find*(
 
   try:
     trace "Finding providers for host", host = $host
-    d.ensureDhtPopulated()
     without var providers =? (await d.protocol.getProviders(host.toNodeId())).mapFailure,
       error:
       trace "Error finding providers for host", host = $host, exc = error.msg
@@ -197,7 +147,6 @@ method provide*(
 
   try:
     trace "Providing host", host = $host
-    d.ensureDhtPopulated()
     let nodes = await d.protocol.addProvider(host.toNodeId(), d.providerRecord.get)
     if nodes.len > 0:
       trace "Provided to nodes", nodes = nodes.len
@@ -236,6 +185,9 @@ proc updateAnnounceRecord*(d: Discovery, addrs: openArray[MultiAddress]) =
     .init(d.key, PeerRecord.init(d.peerId, d.announceAddrs))
     .expect("Should construct signed record").some
 
+  if not d.protocol.isNil:
+    d.protocol.updateRecord(d.providerRecord).expect("Should update SPR")
+
 proc updateDhtRecord*(d: Discovery, addrs: openArray[MultiAddress]) =
   ## Update providers record
   ##
@@ -256,16 +208,10 @@ proc start*(d: Discovery) {.async: (raises: []).} =
     error "Error starting discovery", exc = exc.msg
 
 proc stop*(d: Discovery) {.async: (raises: []).} =
-  if not d.refreshRoutingTableFut.isNil:
-    try:
-      await noCancel d.refreshRoutingTableFut.cancelAndWait()
-    except CatchableError as exc:
-      trace "Error cancelling background DHT refresh", exc = exc.msg
-  if not d.protocol.isNil and not d.protocol.transport.isNil:
-    try:
-      await noCancel d.protocol.closeWait()
-    except CatchableError as exc:
-      error "Error stopping discovery", exc = exc.msg
+  try:
+    await noCancel d.protocol.closeWait()
+  except CatchableError as exc:
+    error "Error stopping discovery", exc = exc.msg
 
 proc new*(
     T: type Discovery,
@@ -274,7 +220,7 @@ proc new*(
     bindPort = 0.Port,
     announceAddrs: openArray[MultiAddress],
     bootstrapNodes: openArray[SignedPeerRecord] = [],
-    store: KVStore,
+    store: Datastore = SQLiteDatastore.new(datastore.Memory).expect("Should not fail!"),
 ): Discovery =
   ## Create a new Discovery node instance for the given key and datastore
   ##
@@ -299,7 +245,7 @@ proc new*(
     bindPort = bindPort,
     record = self.providerRecord.get,
     bootstrapRecords = bootstrapNodes,
-    rng = rng.Rng.instance(),
+    rng = Rng.instance(),
     providers = ProvidersManager.new(store),
     config = discoveryConfig,
   )
