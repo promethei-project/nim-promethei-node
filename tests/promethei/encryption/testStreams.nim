@@ -1,5 +1,5 @@
 import pkg/libp2p/stream/lpstream
-import archivist/encryption/streams
+import promethei/encryption/streams
 import ../../asynctest
 import ./examples
 
