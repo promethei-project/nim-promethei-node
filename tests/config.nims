@@ -14,4 +14,4 @@ when not defined(chronicles_log_level):
     "logging" # ensure that logging is ignored at runtime
 
 --define:
-  "archivistAsynctreeTestHooks" # test-only worker counters in asynctree.nim
+  "prometheiAsynctreeTestHooks" # test-only worker counters in asynctree.nim

@@ -4,8 +4,8 @@ import ./imports
 
 ## Limit which integration tests to run by setting the
 ## environment variable during compilation. For example:
-## ARCHIVIST_INTEGRATION_TEST_INCLUDES="testFoo.nim,testBar.nim"
-const includes = getEnv("ARCHIVIST_INTEGRATION_TEST_INCLUDES")
+## PROMETHEI_INTEGRATION_TEST_INCLUDES="testFoo.nim,testBar.nim"
+const includes = getEnv("PROMETHEI_INTEGRATION_TEST_INCLUDES")
 
 when includes != "":
   # import only the specified tests

@@ -4,10 +4,10 @@ import std/options
 import std/strutils
 import std/times
 import pkg/ethers
-import pkg/archivist/marketplace/contracts/marketplacecontract
+import pkg/promethei/marketplace/contracts/marketplacecontract
 import ../testbed/helpers/project
 
-const marketAddressEnvName = "ARCHIVIST_MARKET_ADDRESS"
+const marketAddressEnvName = "PROMETHEI_MARKET_ADDRESS"
 const marketPlaceholderName = "Marketplace#Marketplace"
 const testMarketPlaceholderName = "Marketplace#TestMarketplace"
 

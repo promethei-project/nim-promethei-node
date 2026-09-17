@@ -1,0 +1,119 @@
+## Copyright (c) 2025 Promethei Authors
+## Copyright (c) 2023 Status Research & Development GmbH
+## Licensed under either of
+##  * Apache License, version 2.0, ([LICENSE-APACHE](LICENSE-APACHE))
+##  * MIT license ([LICENSE-MIT](LICENSE-MIT))
+## at your option.
+## This file may not be copied, modified, or distributed except according to
+## those terms.
+
+{.push raises: [].}
+
+import pkg/libp2p
+import pkg/questionable
+import pkg/questionable/results
+import pkg/stew/byteutils
+import pkg/serde/json
+
+import ../../units
+import ../../errors
+
+import ./promethei
+
+proc encode*(self: PrometheiTree): seq[byte] =
+  var pb = initProtoBuffer()
+  pb.write(1, self.mcodec.uint64)
+  pb.write(2, self.leavesCount.uint64)
+  for node in self.nodes:
+    var nodesPb = initProtoBuffer()
+    nodesPb.write(1, node)
+    nodesPb.finish()
+    pb.write(3, nodesPb)
+
+  pb.finish
+  pb.buffer
+
+proc decode*(_: type PrometheiTree, data: openArray[byte]): ?!PrometheiTree =
+  if data.len == 0:
+    return success nil.PrometheiTree
+
+  var pb = initProtoBuffer(data)
+  var mcodecCode: uint64
+  var leavesCount: uint64
+  discard ?pb.getField(1, mcodecCode).mapFailure
+  discard ?pb.getField(2, leavesCount).mapFailure
+
+  let mcodec = MultiCodec.codec(mcodecCode.int)
+  if mcodec == InvalidMultiCodec:
+    return failure("Invalid MultiCodec code " & $mcodecCode)
+
+  var
+    nodesBuff: seq[seq[byte]]
+    nodes: seq[ByteHash]
+
+  if ?pb.getRepeatedField(3, nodesBuff).mapFailure:
+    for nodeBuff in nodesBuff.mitems:
+      var node: ByteHash
+      var nodePb = initProtoBuffer(move nodeBuff)
+      discard ?nodePb.getField(1, node).mapFailure
+      nodes.add node
+
+  PrometheiTree.fromNodes(mcodec, nodes, leavesCount.int)
+
+proc encode*(self: PrometheiProof): seq[byte] =
+  var pb = initProtoBuffer()
+  pb.write(1, self.mcodec.uint64)
+  pb.write(2, self.index.uint64)
+  pb.write(3, self.nleaves.uint64)
+
+  for node in self.path:
+    var nodesPb = initProtoBuffer()
+    nodesPb.write(1, node)
+    nodesPb.finish()
+    pb.write(4, nodesPb)
+
+  pb.finish
+  pb.buffer
+
+proc decode*(_: type PrometheiProof, data: openArray[byte]): ?!PrometheiProof =
+  if data.len == 0:
+    return failure("Unable to decode proof, no data provided")
+
+  var pb = initProtoBuffer(data)
+  var mcodecCode: uint64
+  var index: uint64
+  var nleaves: uint64
+  discard ?pb.getField(1, mcodecCode).mapFailure
+
+  let mcodec = MultiCodec.codec(mcodecCode.int)
+  if mcodec == InvalidMultiCodec:
+    return failure("Invalid MultiCodec code " & $mcodecCode)
+
+  discard ?pb.getField(2, index).mapFailure
+  discard ?pb.getField(3, nleaves).mapFailure
+
+  var
+    nodesBuff: seq[seq[byte]]
+    nodes: seq[ByteHash]
+
+  if ?pb.getRepeatedField(4, nodesBuff).mapFailure:
+    for nodeBuff in nodesBuff.mitems:
+      var node: ByteHash
+      var nodePb = initProtoBuffer(move nodeBuff)
+      discard ?nodePb.getField(1, node).mapFailure
+      nodes.add node
+
+  PrometheiProof.init(mcodec, index.int, nleaves.int, nodes)
+
+proc fromJson*(_: type PrometheiProof, json: JsonNode): ?!PrometheiProof =
+  expectJsonKind(Cid, JString, json)
+  var bytes: seq[byte]
+  try:
+    bytes = hexToSeqByte(json.str)
+  except ValueError as err:
+    return failure(err)
+
+  PrometheiProof.decode(bytes)
+
+func `%`*(proof: PrometheiProof): JsonNode =
+  %byteutils.toHex(proof.encode())

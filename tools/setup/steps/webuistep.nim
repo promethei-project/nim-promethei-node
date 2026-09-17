@@ -3,7 +3,7 @@ import ../app
 
 proc setEnableWebUi(app: App) =
   app.webUi = true
-  app.writeConfigLine("# Durability-Labs webUI support:")
+  app.writeConfigLine("# Promethei-Project webUI support:")
   app.writeConfigLine("api-cors-origin=\"*\"")
   app.writeConfigLine("# URL: https://app.archivist.storage\n")
 
@@ -18,14 +18,14 @@ proc getWebUiQuestion*(): ChoiceQuestion =
         ChoiceOption(
           title: "Yes",
           description:
-            @["The Archivist node will support the Durability-Labs web interface."],
-          warning: "Allows Cross-origin. WebApp hosted on Durability-Labs servers.",
+            @["The Promethei node will support the Promethei-Project web interface."],
+          warning: "Allows Cross-origin. WebApp hosted on Promethei-Project servers.",
           action: setEnableWebUi,
         ),
         ChoiceOption(
           title: "No",
           description:
-            @["The Archivist node will not support the Durability-Labs webApp."],
+            @["The Promethei node will not support the Promethei-Project webApp."],
           warning: "",
           action: setNo,
         ),

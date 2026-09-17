@@ -14,7 +14,7 @@ on:
       - '!.github/workflows/docker-reusable.yml'
       - '!.github/workflows/deploy-on-network.yml'
       - 'docker/**'
-      - '!docker/archivist.Dockerfile'
+      - '!docker/promethei.Dockerfile'
       - '!docker/docker-entrypoint.sh'
   workflow_dispatch:
     inputs:
@@ -47,7 +47,7 @@ jobs:
       - name: Get submodule short hash
         id: get-hash
         run: |
-          hash=$(git rev-parse --short HEAD:vendor/archivist-contracts)
+          hash=$(git rev-parse --short HEAD:vendor/promethei-contracts)
           echo "hash=$hash" >> $GITHUB_OUTPUT
 
   build-and-push:
@@ -55,12 +55,12 @@ jobs:
     uses: ./.github/workflows/docker-reusable.yml
     needs: get-contracts-hash
     with:
-      nimflags: '-d:release -d:disableMarchNative -d:nimleopard_portable_build -d:archivist_system_testing_options -d:verify_circuit=true'
+      nimflags: '-d:release -d:disableMarchNative -d:nimleopard_portable_build -d:promethei_system_testing_options -d:verify_circuit=true'
       nat_ip_auto: true
       tag_latest: ${{ github.ref_name == github.event.repository.default_branch || startsWith(github.ref, 'refs/tags/') }}
       tag_suffix: dist-tests
       tag_stable: ${{ startsWith(github.ref, 'refs/tags/') }}
-      contract_image: "durabilitylabs/archivist-contracts:sha-${{ needs.get-contracts-hash.outputs.hash }}-dist-tests"
+      contract_image: "durabilitylabs/promethei-contracts:sha-${{ needs.get-contracts-hash.outputs.hash }}-dist-tests"
       run_release_tests: ${{ inputs.run_release_tests }}
       release_tests_namespace: ${{ inputs.release_tests_namespace || 'devnet' }}
     secrets: inherit
@@ -72,7 +72,7 @@ jobs:
     if: github.ref_type == 'tag'
     with:
       network: testnet
-      archivist_image: ${{ needs.build-and-push.outputs.archivist_image }}
+      promethei_image: ${{ needs.build-and-push.outputs.promethei_image }}
     secrets: inherit
 
   deploy-devnet:
@@ -82,5 +82,5 @@ jobs:
     if: ${{ !(failure() || cancelled()) && (inputs.deploy_devnet || github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) }}
     with:
       network: devnet
-      archivist_image: ${{ needs.build-and-push.outputs.archivist_image }}
+      promethei_image: ${{ needs.build-and-push.outputs.promethei_image }}
     secrets: inherit
