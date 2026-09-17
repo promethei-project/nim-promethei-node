@@ -2,7 +2,7 @@ import std/strutils
 import std/tables
 
 import pkg/ethers/provider
-from archivist/clock import SecondsSince1970
+from promethei/clock import SecondsSince1970
 
 export provider.Block
 

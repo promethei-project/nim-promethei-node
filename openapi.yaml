@@ -2,8 +2,8 @@ openapi: 3.0.3
 
 info:
   version: 0.0.1
-  title: Archivist API
-  description: "List of endpoints and interfaces available to Archivist API users"
+  title: Promethei API
+  description: "List of endpoints and interfaces available to Promethei API users"
 
 security:
   - {}
@@ -115,7 +115,7 @@ components:
         seen:
           type: boolean
 
-    ArchivistVersion:
+    PrometheiVersion:
       type: object
       properties:
         version:
@@ -151,7 +151,7 @@ components:
         - announceAddresses
         - ethAddress
         - table
-        - archivist
+        - promethei
       properties:
         id:
           $ref: "#/components/schemas/PeerId"
@@ -173,8 +173,8 @@ components:
             nullable: true
         table:
           $ref: "#/components/schemas/PeersTable"
-        archivist:
-          $ref: "#/components/schemas/ArchivistVersion"
+        promethei:
+          $ref: "#/components/schemas/PrometheiVersion"
 
     DebugPeerRecord:
       type: object
@@ -482,7 +482,7 @@ components:
           description: "Amount of storage reserved (in bytes) in the node's local repository for future use when storage requests will be picked up and hosted by the node using node's availability. This does not include the storage currently in use."
 
 servers:
-  - url: "http://localhost:8080/api/archivist/v1"
+  - url: "http://localhost:8080/api/promethei/v1"
 
 tags:
   - name: Marketplace
