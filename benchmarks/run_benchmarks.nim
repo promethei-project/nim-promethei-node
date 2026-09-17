@@ -4,9 +4,9 @@ import std/[times, os, strutils, terminal]
 import pkg/questionable
 import pkg/questionable/results
 
-import pkg/archivist/[rng, stores, merkletree, archivisttypes, slots]
-import pkg/archivist/utils/[json, poseidon2digest]
-import pkg/archivist/slots/[builder, sampler/utils, backends/helpers]
+import pkg/promethei/[rng, stores, merkletree, prometheitypes, slots]
+import pkg/promethei/utils/[json, poseidon2digest]
+import pkg/promethei/slots/[builder, sampler/utils, backends/helpers]
 import pkg/constantine/math/[arithmetic, io/io_bigints, io/io_fields]
 
 import ./utils

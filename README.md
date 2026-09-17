@@ -1,6 +1,6 @@
 # Decentralized Durability Engine
 
-> The Archivist project aims to create a decentralized durability engine that allows persisting data in p2p networks. In other words, it allows storing files and data with predictable durability guarantees for later retrieval.
+> The Promethei project aims to create a decentralized durability engine that allows persisting data in p2p networks. In other words, it allows storing files and data with predictable durability guarantees for later retrieval.
 
 > WARNING: This project is under active development and is considered pre-alpha.
 
@@ -11,20 +11,20 @@
 ## Download
 
 ### Binaries
-Release binaries are available for several platforms on the [Github Release Page](https://github.com/durability-labs/archivist-node/releases/).
+Release binaries are available for several platforms on the [Github Release Page](https://github.com/promethei-project/nim-promethei-node/releases/).
 
 1. Download the binaries for your platform.
 1. Unpack in an install location of your choice.
 1. Skip to [Configuration](#configuration).
 
 ### Docker
-Docker images are available for each released version. Images are tagged as follows: `durabilitylabs/archivist-node:<VERSION NUMBER>`
+Docker images are available for each released version. Images are tagged as follows: `durabilitylabs/nim-promethei-node:<VERSION NUMBER>`
 
-For example: `durabilitylabs/archivist-node:0.1.0`
+For example: `durabilitylabs/nim-promethei-node:0.1.0`
 
-We recommend configuring your Archivist docker container using environment variables. Here is an example [docker-compose.yaml](./docker/docker-compose.yaml)
+We recommend configuring your Promethei docker container using environment variables. Here is an example [docker-compose.yaml](./docker/docker-compose.yaml)
 
-> WARNING: Release binaries and docker images are built with common CPU instruction sets and may not be optimal for your system. To get the best performance out of Archivist, we recommend you [build from sources](#build).
+> WARNING: Release binaries and docker images are built with common CPU instruction sets and may not be optimal for your system. To get the best performance out of Promethei, we recommend you [build from sources](#build).
 
 ## Build
 
@@ -60,7 +60,7 @@ Building in windows requires the following additional setup:
     mingw and msys2 folders, e.g:
     `C:\mingw64\bin;C:\msys64\usr\bin;%USERPROFILE%\AppData\Local\Microsoft\WindowsApps`
   - if you have WSL installed and your C:\Windows\System32 contains bash.exe
-    you're on an old version of WSL and the Archivist build will not work until
+    you're on an old version of WSL and the Promethei build will not work until
     it is uninstalled
 
 > Note: the commands in the rest of this document should be executed in
@@ -85,7 +85,7 @@ The executable will be placed under the `build` directory under the project root
 
 ## Configuration
 
-It is possible to configure an Archivist node in several ways:
+It is possible to configure an Promethei node in several ways:
  1. CLI options
  2. Environment variables
  3. Configuration file
@@ -94,7 +94,7 @@ The order of priority is the same as above: CLI options --> Environment variable
 
 ### Setup
 
-Archivist comes with a guided setup tool. This will generate a configuration file for you.
+Promethei comes with a guided setup tool. This will generate a configuration file for you.
 
 ```bash
 build/setup
@@ -102,15 +102,15 @@ build/setup
 
 ## Run
 
-Run the archivist executable to start the node:
+Run the promethei executable to start the node:
 
 ```bash
-build/archivist
+build/promethei
 ```
 
 ## API
 
-The node exposes a REST API that can be used to interact with it. [Overview of the API](https://durability-labs.github.io/archivist-node).
+The node exposes a REST API that can be used to interact with it. [Overview of the API](https://promethei-project.github.io/nim-promethei-node).
 
 ## Contributing and development
 

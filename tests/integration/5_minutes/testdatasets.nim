@@ -5,7 +5,7 @@ import pkg/asynctest/chronos/unittest2
 import pkg/libp2p/cid
 import pkg/libp2p/multihash
 import pkg/questionable
-import pkg/archivist/archivisttypes
+import pkg/promethei/prometheitypes
 import ../../testbed
 
 suite "Node datasets":

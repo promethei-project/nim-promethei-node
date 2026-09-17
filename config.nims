@@ -19,7 +19,7 @@ when defined(release):
   switch("opt", "speed")
 
   # Opt-in for local builds on toolchains known to support LTO.
-  when defined(archivist_release_lto):
+  when defined(promethei_release_lto):
     switch("define", "lto")
     switch("define", "lto_incremental")
     switch("passC", "-flto")
