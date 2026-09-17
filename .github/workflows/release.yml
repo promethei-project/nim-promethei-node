@@ -18,8 +18,8 @@ env:
   nim_version:   2.2.6
   rust_version:  1.79.0
   cmake_version: 3.x
-  artifacts_base: archivist
-  archivist_binary_base: archivist
+  artifacts_base: promethei
+  promethei_binary_base: promethei
   cirdl_binary_base: cirdl
   setup_binary_base: setup
   build_dir: build
@@ -92,15 +92,15 @@ jobs:
             windows*) os_name="windows" ;;
           esac
           github_ref_name="${GITHUB_REF_NAME/\//-}"
-          archivist_binary="${{ env.archivist_binary_base }}-${github_ref_name}-${os_name}-${{ matrix.cpu }}"
+          promethei_binary="${{ env.promethei_binary_base }}-${github_ref_name}-${os_name}-${{ matrix.cpu }}"
           cirdl_binary="${{ env.cirdl_binary_base }}-${github_ref_name}-${os_name}-${{ matrix.cpu }}"
           setup_binary="${{ env.setup_binary_base }}-${github_ref_name}-${os_name}-${{ matrix.cpu }}"
           if [[ ${os_name} == "windows" ]]; then
-            archivist_binary="${archivist_binary}.exe"
+            promethei_binary="${promethei_binary}.exe"
             cirdl_binary="${cirdl_binary}.exe"
             setup_binary="${setup_binary}.exe"
           fi
-          echo "archivist_binary=${archivist_binary}" >> $GITHUB_ENV
+          echo "promethei_binary=${promethei_binary}" >> $GITHUB_ENV
           echo "cirdl_binary=${cirdl_binary}" >> $GITHUB_ENV
           echo "setup_binary=${setup_binary}" >> $GITHUB_ENV
 
@@ -112,7 +112,7 @@ jobs:
       - name: Release - Build
         run: |
           nimble build ${{ env.nim_flags }}
-          mv ${{ env.build_dir }}/${{ env.archivist_binary_base }}* ${{ env.build_dir }}/${{ env.archivist_binary }}
+          mv ${{ env.build_dir }}/${{ env.promethei_binary_base }}* ${{ env.build_dir }}/${{ env.promethei_binary }}
           mv ${{ env.build_dir }}/tools/${{ env.cirdl_binary_base }}/${{ env.cirdl_binary_base }}* ${{ env.build_dir }}/${{ env.cirdl_binary }}
           mv ${{ env.build_dir }}/tools/${{ env.setup_binary_base }}/${{ env.setup_binary_base }}* ${{ env.build_dir }}/${{ env.setup_binary }}
 
@@ -128,7 +128,7 @@ jobs:
       - name: Release - Upload build artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: release-${{ env.archivist_binary }}
+          name: release-${{ env.promethei_binary }}
           path: ${{ env.build_dir }}/*
           retention-days: 30
 
@@ -154,12 +154,12 @@ jobs:
           }
 
           # Compress and prepare
-          for file in ${{ env.archivist_binary_base }}*; do
+          for file in ${{ env.promethei_binary_base }}*; do
             if [[ "${file}" == *".exe"* ]]; then
 
               # Windows - binaries and libs
               file="${file%.*}"
-              subset="${file//${{ env.archivist_binary_base }}-/}"
+              subset="${file//${{ env.promethei_binary_base }}-/}"
               archive="${{ env.artifacts_base }}-${subset}.zip"
               binaries=""
               for binary in *-${subset}.exe; do
@@ -173,7 +173,7 @@ jobs:
             else
 
               # Linux/macOS binaries
-              subset="${file//${{ env.archivist_binary_base }}-/}"
+              subset="${file//${{ env.promethei_binary_base }}-/}"
               archive="${{ env.artifacts_base }}-${subset}.tar.gz"
               chmod 755 *-${subset}
               binaries=""

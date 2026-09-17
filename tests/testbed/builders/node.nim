@@ -185,7 +185,7 @@ func overlayMaintenanceInterval*(builder: NodeBuilder, interval: int): NodeBuild
   builder
 
 proc dataDirResolved(builder: NodeBuilder): string =
-  builder.dataDir |? createTempDir("archivist-", "-testbed")
+  builder.dataDir |? createTempDir("promethei-", "-testbed")
 
 func apiBindAddressResolved(builder: NodeBuilder): IpAddress =
   builder.apiBindAddress |? static parseIpAddress("0.0.0.0")

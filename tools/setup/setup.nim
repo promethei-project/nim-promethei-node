@@ -14,16 +14,16 @@ import ./steps/lineitemstep
 
 proc intro() =
   newline()
-  p1("Welcome to Archivist Setup utility")
-  p2("This tool will help you configure your Archivist node.")
+  p1("Welcome to Promethei Setup utility")
+  p2("This tool will help you configure your Promethei node.")
   p2("Where possible, sane default values are provided.")
   p2("The selected configuration can be adjusted afterwards")
   p2("by manually editing the generated configuration file.")
-  p3("Be sure to run this setup from Archivist's install location.")
+  p3("Be sure to run this setup from Promethei's install location.")
   newline()
 
 proc main() =
-  info "Archivist Setup", version = compiledVersion
+  info "Promethei Setup", version = compiledVersion
 
   let
     app = App()

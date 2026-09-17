@@ -67,7 +67,7 @@ jobs:
       - name: Integration tests
         if: matrix.tests == 'integration'
         env:
-          ARCHIVIST_INTEGRATION_TEST_INCLUDES: ${{ matrix.includes }}
+          PROMETHEI_INTEGRATION_TEST_INCLUDES: ${{ matrix.includes }}
         run: nimble testIntegration
 
       - name: Tools tests
