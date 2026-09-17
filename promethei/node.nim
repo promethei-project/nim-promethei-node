@@ -33,7 +33,7 @@ import pkg/libp2p/signed_envelope
 
 import ./metrics
 import ./chunker
-import ./archivisttypes
+import ./prometheitypes
 import ./slots
 import ./clock
 import ./blocktype as bt
