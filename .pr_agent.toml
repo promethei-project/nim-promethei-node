@@ -10,7 +10,7 @@ extra_instructions = """The changes_diagram field MUST contain a mermaid flowcha
 [pr_reviewer]
 require_score_review = true
 num_max_findings = 5
-extra_instructions = """archivist-node is a Nim 2.2.x codebase: chronos async, libp2p, ORC memory management, taskpools threaded workers.
+extra_instructions = """nim-promethei-node is a Nim 2.2.x codebase: chronos async, libp2p, ORC memory management, taskpools threaded workers.
 
 Scope: keep findings focused on the PR's changes; do not nitpick unrelated code. Exception: if you detect a serious bug (crash, data corruption, deadlock, race, security vulnerability, resource/connection leak, unbounded growth) in code the change touches or depends on — including pre-existing bugs in the affected code paths — flag it with severity Possible Bug or Security Concern even though it is outside the literal diff.
 
