@@ -1,0 +1,230 @@
+{.push raises: [].}
+
+import pkg/metrics
+export metrics
+
+# ── Throughput counters ──
+declarePublicCounter(
+  promethei_block_exchange_blocks_sent, "promethei blockexchange blocks sent"
+)
+declarePublicCounter(
+  promethei_block_exchange_bytes_sent, "promethei blockexchange bytes sent"
+)
+declarePublicCounter(
+  promethei_block_exchange_blocks_received, "promethei blockexchange blocks received"
+)
+declarePublicCounter(
+  promethei_block_exchange_bytes_received, "promethei blockexchange bytes received"
+)
+
+# ── Want-list counters ──
+declarePublicCounter(
+  promethei_block_exchange_want_have_lists_received,
+  "promethei blockexchange wantHave lists received",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_have_lists_sent,
+  "promethei blockexchange wantHave lists sent",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_block_lists_sent,
+  "promethei blockexchange wantBlock lists sent",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_block_lists_received,
+  "promethei blockexchange wantBlock lists received",
+)
+
+# ── Want-entry counters (entry-level granularity) ──
+declarePublicCounter(
+  promethei_block_exchange_want_have_entries_sent,
+  "promethei blockexchange wantHave entries sent",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_have_entries_received,
+  "promethei blockexchange wantHave entries received",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_block_entries_sent,
+  "promethei blockexchange wantBlock entries sent",
+)
+declarePublicCounter(
+  promethei_block_exchange_want_block_entries_received,
+  "promethei blockexchange wantBlock entries received",
+)
+
+# ── Discovery / peer counters ──
+# NOTE: variable name is `discovery_requests` (NOT `_total`) — library auto-appends `_total`
+declarePublicCounter(
+  promethei_block_exchange_discovery_requests,
+  "Total number of peer discovery requests sent",
+)
+declarePublicCounter(
+  promethei_block_exchange_peer_timeouts, "Total number of peer activity timeouts"
+)
+declarePublicCounter(
+  promethei_block_exchange_requests_failed,
+  "Total number of block requests that failed after exhausting retries",
+)
+
+# ── Spurious / retry counters ──
+declarePublicCounter(
+  promethei_block_exchange_spurious_blocks_received,
+  "promethei blockexchange unrequested/duplicate blocks received",
+)
+
+# ── Handle lifecycle counters ──
+declarePublicCounter(
+  promethei_block_exchange_handles_created, "Total number of block handles created"
+)
+declarePublicCounter(
+  promethei_block_exchange_handles_resolved,
+  "Total number of block handles resolved successfully",
+)
+declarePublicCounter(
+  promethei_block_exchange_handles_failed, "Total number of block handles that failed"
+)
+declarePublicCounter(
+  promethei_block_exchange_handles_missing_on_release,
+  "Total number of release attempts on already-resolved handles",
+)
+
+# ── Request outcome counters ──
+declarePublicCounter(
+  promethei_block_exchange_requests_succeeded,
+  "Total number of block requests that succeeded",
+)
+declarePublicCounter(
+  promethei_block_exchange_requests_retried,
+  "Total number of block request retries",
+  labels = ["reason", "attempt"],
+)
+declarePublicCounter(
+  promethei_block_exchange_requests_abandoned,
+  "Total number of block requests abandoned",
+)
+
+# ── State gauges ──
+declarePublicGauge(
+  promethei_block_exchange_pending_block_requests,
+  "promethei blockexchange pending block requests",
+)
+
+# ── Inflight gauges (moved from advertiser.nim and discovery.nim) ──
+declarePublicGauge(promethei_inflight_advertise, "inflight advertise requests")
+declarePublicGauge(promethei_inflight_discovery, "inflight discovery requests")
+
+# ── Sender capacity gauges (service-side saturation) ──
+# task_queue_depth / inflight_* answer "are we queueing or saturated?"
+declarePublicGauge(
+  promethei_block_exchange_task_queue_depth,
+  "Peers waiting on the block-serve task queue",
+)
+declarePublicGauge(
+  promethei_block_exchange_active_serve_tasks,
+  "taskHandler invocations currently running",
+)
+declarePublicGauge(
+  promethei_block_exchange_inflight_sends,
+  "Network messages currently holding the inflight send semaphore",
+)
+declarePublicGauge(
+  promethei_block_exchange_inflight_send_slots_free,
+  "Free slots on the inflight send semaphore",
+)
+declarePublicGauge(
+  promethei_block_exchange_wanted_blocks,
+  "Total blocks peers currently want from this node (sum wantedBlocks)",
+)
+declarePublicCounter(
+  promethei_block_exchange_task_queue_full,
+  "scheduleTask dropped because task queue was full",
+)
+
+# ── Duration histograms ──
+# Buckets span ~1ms-120s so p95 does not clip at the default 10s top bucket.
+const BlockExcDurationBuckets = [
+  0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0,
+  120.0,
+]
+
+declarePublicHistogram(
+  promethei_block_exchange_retrieval_duration_seconds,
+  "promethei blockexchange block retrieval duration in seconds",
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_request_outcome_duration_seconds,
+  "Block request duration by outcome type",
+  labels = ["outcome"],
+  buckets = BlockExcDurationBuckets,
+)
+
+# Split serve-path latency: queue wait vs store read vs network send.
+# Queue wait high + service low => capacity problem. Service high => store/net.
+declarePublicHistogram(
+  promethei_block_exchange_task_queue_wait_seconds,
+  "Time from scheduleTask to taskHandler start (queue wait)",
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_task_store_read_seconds,
+  "Time reading wanted blocks from local store in taskHandler",
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_task_send_seconds,
+  "Time sending all delivery batches for one taskHandler run",
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_network_inflight_wait_seconds,
+  "Time waiting to acquire the inflight send semaphore",
+  labels = ["kind"],
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_network_send_seconds,
+  "End-to-end network send time (inflight wait + writeLp)",
+  labels = ["kind"],
+  buckets = BlockExcDurationBuckets,
+)
+
+# Receiver-side: time the serial readLoop handler (validate + store + resolve).
+# High handler time blocks the next readLp, causing TCP backpressure on sender.
+declarePublicHistogram(
+  promethei_block_exchange_recv_handler_seconds,
+  "Time inside blocksDeliveryHandler (validate + store + resolve) per message",
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_recv_decode_seconds,
+  "Time to decode incoming message in readLoop",
+  buckets = BlockExcDurationBuckets,
+)
+# Sender-side: split network_send into encode (sync CPU) vs writeLp (TCP I/O).
+declarePublicHistogram(
+  promethei_block_exchange_network_encode_seconds,
+  "Time to encode outgoing message (sync, blocks event loop)",
+  labels = ["kind"],
+  buckets = BlockExcDurationBuckets,
+)
+declarePublicHistogram(
+  promethei_block_exchange_network_write_seconds,
+  "Time in conn.writeLp (TCP write) after encode",
+  labels = ["kind"],
+  buckets = BlockExcDurationBuckets,
+)
+# Bytes per writeLp call — post-encode buffer size.
+# Used to compute per-write throughput and verify the 64MB-per-batch assumption.
+# Top bucket 128MiB covers 128x512KiB blocks + protobuf framing without
+# clamping p50/p95 into +Inf.
+declarePublicHistogram(
+  promethei_block_exchange_network_write_bytes,
+  "Bytes written per conn.writeLp call (post-encode buffer)",
+  labels = ["kind"],
+  buckets = [
+    0.0, 1024.0, 16384.0, 65536.0, 262144.0, 1048576.0, 4194304.0, 16777216.0,
+    67108864.0, 134217728.0,
+  ],
+)

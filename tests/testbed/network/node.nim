@@ -22,7 +22,7 @@ type Node* = ref object
   stderrHandler: Future[void].Raising([])
 
 func apiUrl*(node: Node): string =
-  "http://" & $node.apiAddress & ":" & $node.apiPort & "/api/archivist/v1"
+  "http://" & $node.apiAddress & ":" & $node.apiPort & "/api/promethei/v1"
 
 proc waitForOutput(node: Node) {.async.} =
   without output =? node.waitForOutput:
@@ -62,7 +62,7 @@ proc handleStderr(node: Node) {.async: (raises: []).} =
     raise newException(Defect, "error handling node stderr: " & error.msg)
 
 proc start(node: Node) {.async.} =
-  let command = projectBuildDir / "integration-test" / "archivist-for-testing"
+  let command = projectBuildDir / "integration-test" / "promethei-for-testing"
   var arguments = node.arguments
   arguments &= "--data-dir=" & $node.dataDir
   arguments &= "--api-bindaddr=" & $node.apiAddress

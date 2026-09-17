@@ -1,13 +1,13 @@
 ---
 name: Release
-about: Archivist release
-title: "Release Archivist 0.0.1"
+about: Promethei release
+title: "Release Promethei 0.0.1"
 labels: release
 assignees: ''
 
 ---
 
-### [Archivist release - v0.0.1](../releases/tag/v0.0.1)
+### [Promethei release - v0.0.1](../releases/tag/v0.0.1)
 
 - [ ] Update contracts submodule if required
 - [ ] Deploy new smart contracts if required

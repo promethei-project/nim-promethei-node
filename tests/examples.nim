@@ -3,19 +3,19 @@ import std/sequtils
 import std/times
 import std/typetraits
 
-import pkg/archivist/marketplace/contracts/requests
-import pkg/archivist/rng
-import pkg/archivist/marketplace/contracts/proofs
-import pkg/archivist/marketplace/sales/slotqueue
-import pkg/archivist/marketplace/timestamps
-import pkg/archivist/marketplace/tokens
-import pkg/archivist/stores
-import pkg/archivist/units
+import pkg/promethei/marketplace/contracts/requests
+import pkg/promethei/rng
+import pkg/promethei/marketplace/contracts/proofs
+import pkg/promethei/marketplace/sales/slotqueue
+import pkg/promethei/marketplace/timestamps
+import pkg/promethei/marketplace/tokens
+import pkg/promethei/stores
+import pkg/promethei/units
 
 import pkg/chronos
 import pkg/stint
 
-import ./archivist/helpers/randomchunker
+import ./promethei/helpers/randomchunker
 
 export randomchunker
 export units
