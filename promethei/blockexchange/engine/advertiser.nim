@@ -9,11 +9,10 @@
 
 {.push raises: [].}
 
-import std/sequtils
 import pkg/chronos
 import pkg/libp2p/cid
 import pkg/libp2p/multicodec
-import ./metrics
+import pkg/metrics
 import pkg/questionable
 import pkg/questionable/results
 
@@ -27,17 +26,15 @@ import ../../discovery
 import ../../stores/blockstore
 import ../../logutils
 import ../../manifest
-import ../../errors
 
 logScope:
   topics = "promethei discoveryengine advertiser"
 
+declareGauge(promethei_inflight_advertise, "inflight advertise requests")
+
 const
   DefaultConcurrentAdvertRequests = 10
   DefaultAdvertiseLoopSleep = 30.minutes
-  DefaultMinAdvertisePeers = 16
-  DefaultAdvertiseRetrySleep = 30.seconds
-  DefaultAdvertiseRetryWindow = 10.minutes
 
 type Advertiser* = ref object of RootObj
   localStore*: BlockStore # Local block store for this instance
@@ -47,16 +44,12 @@ type Advertiser* = ref object of RootObj
   concurrentAdvReqs: int # Concurrent advertise requests
 
   advertiseLocalStoreLoop*: Future[void].Raising([]) # Advertise loop task handle
+  advertiseJobFut: Future[void]
   advertiseQueue*: AsyncQueue[Cid] # Advertise queue
   trackedFutures*: TrackedFutures # Advertise tasks futures
 
   advertiseLocalStoreLoopSleep: Duration # Advertise loop sleep
   inFlightAdvReqs*: Table[Cid, Future[void]] # Inflight advertise requests
-  pendingAdvRetries: Table[Cid, Future[void]] # Delayed sparse retry tasks
-  minAdvertisePeers: int # Desired routing-table size before advertising
-  advertiseRetrySleep: Duration # Delay before retrying sparse startup advertise
-  advertiseRetryWindow: Duration # Startup window for sparse advertise retries
-  startedAt: Moment # Time advertiser started
 
 proc addCidToQueue(b: Advertiser, cid: Cid) {.async: (raises: [CancelledError]).} =
   if cid notin b.advertiseQueue:
@@ -88,60 +81,40 @@ proc advertiseBlock(b: Advertiser, cid: Cid) {.async: (raises: [CancelledError])
   except CatchableError as e:
     error "failed to advertise block", cid, error = e.msgDetail
 
+proc sleepOrStopped(b: Advertiser) {.async: (raises: [CancelledError]).} =
+  let sleepFut = sleepAsync(b.advertiseLocalStoreLoopSleep)
+  try:
+    await sleepFut or b.advertiseJobFut
+  except CatchableError as exc:
+    trace "Exception waiting for advertiser sleep", exc = exc.msg
+  finally:
+    if not sleepFut.finished:
+      await noCancel sleepFut.cancelAndWait()
+
+proc advertiseLocalStoreBlocks(b: Advertiser) {.async: (raises: [CancelledError]).} =
+  without cidsIter =? await b.localStore.listBlocks(blockType = BlockType.Manifest), err:
+    trace "Error retrieving manifest iterator, advertising skipped!", err = err.msg
+    return
+
+  defer:
+    if err =? (await cidsIter.dispose()).errorOption:
+      warn "Error disposing manifest iterator", err = err.msg
+
+  trace "Advertiser begins iterating blocks..."
+  for c in cidsIter:
+    if cid =? await c:
+      await b.advertiseBlock(cid)
+  trace "Advertiser iterating blocks finished."
+
 proc advertiseLocalStoreLoop(b: Advertiser) {.async: (raises: []).} =
   try:
     while b.advertiserRunning:
-      without cidsIter =? await b.localStore.listBlocks(blockType = BlockType.Manifest),
-        err:
-        trace "Error retrieving manifest iterator, advertising skipped!", err = err.msg
-        await sleepAsync(b.advertiseLocalStoreLoopSleep)
-        continue
-
-      defer:
-        if err =? catchAsync(await cidsIter.dispose()).errorOption:
-          warn "Error disposing manifest iterator", err = err.msg
-
-      trace "Advertiser begins iterating blocks..."
-      for c in cidsIter:
-        if cid =? catchAsync(await c):
-          await b.advertiseBlock(cid)
-      trace "Advertiser iterating blocks finished."
-
-      await sleepAsync(b.advertiseLocalStoreLoopSleep)
+      await b.advertiseLocalStoreBlocks()
+      await b.sleepOrStopped()
   except CancelledError:
     warn "Cancelled advertise local store loop"
 
   info "Exiting advertise task loop"
-
-proc hasElapsed(since: Moment, dur: Duration): bool =
-  (Moment.now() - since) >= dur
-
-proc shouldRetryAdvertise(b: Advertiser): bool =
-  b.minAdvertisePeers > 0 and b.discovery.nodesDiscovered() < b.minAdvertisePeers and
-    not hasElapsed(b.startedAt, b.advertiseRetryWindow)
-
-proc delayedAdvertiseRetry(b: Advertiser, cid: Cid) {.async: (raises: []).} =
-  try:
-    await sleepAsync(b.advertiseRetrySleep)
-
-    if b.advertiserRunning and not hasElapsed(b.startedAt, b.advertiseRetryWindow):
-      trace "Requeueing advertisement retry",
-        cid, nodes = b.discovery.nodesDiscovered(), target = b.minAdvertisePeers
-      await b.addCidToQueue(cid)
-  except CancelledError:
-    trace "Cancelled sparse startup advertisement retry", cid
-  except CatchableError as exc:
-    warn "Sparse startup advertisement retry failed", cid, err = exc.msg
-  finally:
-    b.pendingAdvRetries.del(cid)
-
-proc scheduleAdvertiseRetry(b: Advertiser, cid: Cid) =
-  if cid in b.pendingAdvRetries:
-    return
-
-  let retry = b.delayedAdvertiseRetry(cid)
-  b.pendingAdvRetries[cid] = retry
-  b.trackedFutures.track(retry)
 
 proc processQueueLoop(b: Advertiser) {.async: (raises: []).} =
   try:
@@ -155,18 +128,13 @@ proc processQueueLoop(b: Advertiser) {.async: (raises: []).} =
       b.inFlightAdvReqs[cid] = request
       promethei_inflight_advertise.set(b.inFlightAdvReqs.len.int64)
 
-      try:
-        await request
-      finally:
+      defer:
         b.inFlightAdvReqs.del(cid)
         promethei_inflight_advertise.set(b.inFlightAdvReqs.len.int64)
 
-      if b.shouldRetryAdvertise():
-        b.scheduleAdvertiseRetry(cid)
+      await request
   except CancelledError:
     warn "Cancelled advertise task runner"
-
-  await noCancel allFutures(toSeq(b.inFlightAdvReqs.values).mapIt(it.cancelAndWait()))
 
   info "Exiting advertise task runner"
 
@@ -178,10 +146,7 @@ proc start*(b: Advertiser) {.async: (raises: []).} =
 
   # The advertiser is expected to be started only once.
   if b.advertiserRunning:
-    warn "Advertiser can only be started once - this should not happen"
-    return
-
-  b.advertiserRunning = true
+    raiseAssert "Advertiser can only be started once - this should not happen"
 
   proc onBlock(cid: Cid) {.async: (raises: []).} =
     try:
@@ -192,7 +157,8 @@ proc start*(b: Advertiser) {.async: (raises: []).} =
   doAssert(b.localStore.onBlockStored.isNone())
   b.localStore.onBlockStored = onBlock.some
 
-  b.startedAt = Moment.now()
+  b.advertiserRunning = true
+  b.advertiseJobFut = newFuture[void]("Advertiser.stop")
   for i in 0 ..< b.concurrentAdvReqs:
     let fut = b.processQueueLoop()
     b.trackedFutures.track(fut)
@@ -209,12 +175,13 @@ proc stop*(b: Advertiser) {.async: (raises: []).} =
     warn "Stopping advertiser without starting it"
     return
 
-  trace "Stopping advertise loop and tasks"
-  await b.trackedFutures.cancelTracked()
-
   b.advertiserRunning = false
+  if not b.advertiseJobFut.isNil and not b.advertiseJobFut.finished:
+    b.advertiseJobFut.complete()
   # Stop incoming tasks from callback and localStore loop
   b.localStore.onBlockStored = CidCallback.none
+  trace "Stopping advertise loop and tasks"
+  await b.trackedFutures.cancelTracked()
   trace "Advertiser loop and tasks stopped"
 
 proc new*(
@@ -223,9 +190,6 @@ proc new*(
     discovery: Discovery,
     concurrentAdvReqs = DefaultConcurrentAdvertRequests,
     advertiseLocalStoreLoopSleep = DefaultAdvertiseLoopSleep,
-    minAdvertisePeers = DefaultMinAdvertisePeers,
-    advertiseRetrySleep = DefaultAdvertiseRetrySleep,
-    advertiseRetryWindow = DefaultAdvertiseRetryWindow,
 ): Advertiser =
   ## Create a advertiser instance
   ##
@@ -236,9 +200,5 @@ proc new*(
     advertiseQueue: newAsyncQueue[Cid](concurrentAdvReqs),
     trackedFutures: TrackedFutures.new(),
     inFlightAdvReqs: initTable[Cid, Future[void]](),
-    pendingAdvRetries: initTable[Cid, Future[void]](),
     advertiseLocalStoreLoopSleep: advertiseLocalStoreLoopSleep,
-    minAdvertisePeers: minAdvertisePeers,
-    advertiseRetrySleep: advertiseRetrySleep,
-    advertiseRetryWindow: advertiseRetryWindow,
   )
