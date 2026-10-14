@@ -4,93 +4,17 @@ Promethei
 Copyright (c) 2026 Promethei Authors
 Copyright (c) 2025-2026 Archivist Authors
 
-This product includes software developed by, and code derived from, other
-projects. Their notices are recorded here because the source files no longer
-carry per-file copyright banners.
-
+This product includes software developed by, and code derived from, other projects.
 
 Notices for code derived into this repository
 ---------------------------------------------
 Copyright (c) 2019, 2021-2025 Status Research & Development GmbH
 Copyright (c) 2014-2018 Juan Batiz-Benet  (bitswap/blockexchange protocol definitions)
 
-
 Vendored dependencies
 ---------------------
-The following projects are vendored under `vendor/`. Each is used under its own
-license and ships its license text with its sources.
+Dependencies are declared in `.gitmodules` — that file is the authoritative, always-current
+list. Each vendored project keeps its own license text inside its directory under `vendor/`.
 
-arnetheduck:
-  - results
-  - sqlite3_abi
-ba0f3:
-  - dnsclient
-cheatfate:
-  - nimcrypto
-codex-storage:
-  - questionable
-guzba:
-  - zippy
-logos-storage:
-  - circom_witnessgen
-markspanbroek:
-  - asynctest
-nim-lang:
-  - threading
-promethei-project:
-  - circomcompat
-  - constantine
-  - contractabi
-  - ethers
-  - groth16
-  - iter
-  - leopard
-  - nat_traversal
-  - nim-kvstore
-  - nim-promethei-storage-proofs-circuits
-  - poseidon2
-  - promethei-contracts
-  - prometheidht
-  - serde
-  - stint
-  - threadspawn
-status-im:
-  - bearssl
-  - blscurve
-  - chronicles
-  - chronos
-  - confutils
-  - eth
-  - faststreams
-  - httputils
-  - json_rpc
-  - json_serialization
-  - lrucache
-  - metrics
-  - minilru
-  - presto
-  - protobuf_serialization
-  - secp256k1
-  - serialization
-  - snappy
-  - stew
-  - taskpools
-  - testutils
-  - toml_serialization
-  - unittest2
-  - websock
-  - zlib
-vacp2p:
-  - bearssl_pkey_decoder
-  - boringssl
-  - jwt
-  - libp2p
-  - lsquic
-zevv:
-  - npeg
-
-Third-party license texts
--------------------------
-See the LICENSE/COPYING file inside each vendored directory, and
-LICENSE-APACHEv2 / LICENSE-MIT at the repository root for this project's
-own licensing.
+This project's own licensing is in `LICENSE-APACHEv2` (Apache-2.0) and `LICENSE-MIT` (MIT);
+use is permitted under either, at your option.
