@@ -1,9 +1,3 @@
-## Copyright (c) 2025 Promethei Authors
-## Licensed under either of
-##  * Apache License, version 2.0, ([LICENSE-APACHE](LICENSE-APACHE))
-##  * MIT license ([LICENSE-MIT](LICENSE-MIT))
-## at your option.
-
 {.push raises: [].}
 
 import pkg/chronicles
