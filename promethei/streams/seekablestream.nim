@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 import pkg/libp2p/stream/lpstream
 import pkg/chronos
 

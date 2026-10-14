@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 # This module implements serialization and deserialization of Manifest
 
 {.push raises: [].}

@@ -1,5 +1,3 @@
-## Copyright (c) 2024 Status Research & Development GmbH
-
 {.deprecated: "use the NimGroth16Backend".}
 
 {.push raises: [].}

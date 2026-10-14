@@ -1,5 +1,3 @@
-## Copyright (c) 2021 Status Research & Development GmbH
-
 import std/tables
 import std/sequtils
 

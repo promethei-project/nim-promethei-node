@@ -1,6 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-##
-
 import std/hashes
 import std/strutils
 

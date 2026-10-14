@@ -1,5 +1,3 @@
-## Copyright (c) 2021 Status Research & Development GmbH
-
 ## Partially taken from nim beacon chain
 
 {.push raises: [].}

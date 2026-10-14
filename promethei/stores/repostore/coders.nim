@@ -1,5 +1,3 @@
-## Copyright (c) 2024 Status Research & Development GmbH
-
 ## Protobuf serialization for RepoStore metadata types
 ##
 ## ```protobuf

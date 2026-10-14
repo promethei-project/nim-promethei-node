@@ -1,5 +1,3 @@
-## Copyright (c) 2024 Status Research & Development GmbH
-
 import std/options
 import std/sets
 import std/tables

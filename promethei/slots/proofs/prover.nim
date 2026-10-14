@@ -1,6 +1,3 @@
-## Copyright (c) 2024 Status Research & Development GmbH
-##
-
 import pkg/chronos
 import pkg/chronicles
 import pkg/circomcompat

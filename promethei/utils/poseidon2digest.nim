@@ -1,5 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-
 import pkg/poseidon2
 import pkg/questionable/results
 import pkg/libp2p/multihash

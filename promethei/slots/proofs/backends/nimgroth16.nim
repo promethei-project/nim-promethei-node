@@ -1,5 +1,3 @@
-## Copyright (c) 2025 Status Research & Development GmbH
-
 {.push raises: [].}
 
 import std/sugar

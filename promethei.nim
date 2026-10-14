@@ -1,5 +1,3 @@
-## Copyright (c) 2021 Status Research & Development GmbH
-
 import pkg/chronos
 import pkg/questionable
 import pkg/confutils

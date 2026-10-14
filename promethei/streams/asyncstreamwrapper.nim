@@ -1,5 +1,3 @@
-## Copyright (c) 2019 Status Research & Development GmbH
-
 {.push raises: [].}
 
 import pkg/chronos

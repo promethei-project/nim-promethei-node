@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 import pkg/questionable/results
 import pkg/kvstore
 import pkg/libp2p

@@ -1,6 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-##
-
 {.push raises: [].}
 
 import std/parseutils

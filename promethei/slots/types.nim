@@ -1,5 +1,3 @@
-## Copyright (c) 2024 Status Research & Development GmbH
-
 type
   Sample*[SomeHash] = object
     cellData*: seq[SomeHash]

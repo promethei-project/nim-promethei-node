@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 import ./erasure/erasure
 import ./erasure/backends/leopard
 

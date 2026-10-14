@@ -1,5 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-
 import std/sugar
 
 import pkg/chronos

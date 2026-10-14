@@ -1,5 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-
 ## Timer
 ## Used to execute a callback in a loop
 

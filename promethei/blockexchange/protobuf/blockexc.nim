@@ -1,5 +1,3 @@
-## Copyright (c) 2021 Status Research & Development GmbH
-
 import std/hashes
 import std/sequtils
 import pkg/stew/endians2

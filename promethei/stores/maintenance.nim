@@ -1,5 +1,3 @@
-## Copyright (c) 2023 Status Research & Development GmbH
-
 ## Store maintenance module
 ## Scans overlays for expiration and drops expired ones.
 

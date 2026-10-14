@@ -1,5 +1,3 @@
-## Copyright (c) 2021 Status Research & Development GmbH
-
 # TODO: This is super inneficient and needs a rewrite, but it'll do for now
 
 {.push raises: [].}

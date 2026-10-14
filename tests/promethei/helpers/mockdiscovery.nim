@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 import pkg/chronos
 import pkg/libp2p
 import pkg/questionable

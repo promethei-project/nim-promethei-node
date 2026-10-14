@@ -1,5 +1,3 @@
-## Copyright (c) 2022 Status Research & Development GmbH
-
 const
   # Namespaces
   PrometheiMetaNamespace* = "meta" # meta info stored here
