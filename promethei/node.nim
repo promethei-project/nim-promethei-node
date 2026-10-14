@@ -996,14 +996,14 @@ proc storeSlot*(
         # tree - so recovery never depends on other slots' holders. Only
         # the inner parity is not reconstructible here; it is regenerated
         # below (it is deterministic from the slot's data).
-        var items: seq[(bt.Block, Natural, ?ArchivistProof)]
+        var items: seq[(bt.Block, Natural, ?PrometheiProof)]
         for idx in 0 ..< manifest.protectedBlocksCount:
           let blk =
             if idx < manifest.originalBlocksCount:
               ?await self.networkStore.getBlock(manifest.originalTreeCid, idx.Natural)
             else:
               ?await self.networkStore.getBlock(manifest.protectedTreeCid, idx.Natural)
-          items.add((blk, idx.Natural, ArchivistProof.none))
+          items.add((blk, idx.Natural, PrometheiProof.none))
         ?await self.networkStore.putBlocks(manifest.treeCid, items)
         success(),
     )
