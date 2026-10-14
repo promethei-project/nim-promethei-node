@@ -1,4 +1,5 @@
-## Copyright (c) 2025 Promethei Authors
+## Copyright (c) 2026 Promethei Authors
+## Copyright (c) 2025-2026 Archivist Authors
 ## Licensed under either of
 ##  * Apache License, version 2.0, ([LICENSE-APACHE](LICENSE-APACHE))
 ##  * MIT license ([LICENSE-MIT](LICENSE-MIT))

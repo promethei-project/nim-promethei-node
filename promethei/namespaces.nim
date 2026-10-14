@@ -1,4 +1,5 @@
-## Copyright (c) 2025 Promethei authors
+## Copyright (c) 2026 Promethei authors
+## Copyright (c) 2025-2026 Archivist authors
 ## Copyright (c) 2022 Status Research & Development GmbH
 ## Licensed under either of
 ##  * Apache License, version 2.0, ([LICENSE-APACHE](LICENSE-APACHE))
