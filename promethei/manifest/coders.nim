@@ -132,88 +132,122 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
     mimetype: string
 
   # Decode `Header` message
-  if pbNode.getField(1, pbHeader).isErr:
+  if pbNode.getRequiredField(1, pbHeader).isErr:
     return failure("Unable to decode `Header` from dag-pb manifest!")
 
-  # Decode `Header` contents
-  if pbHeader.getField(1, treeCidBuf).isErr:
+  # Decode `Header` contents. Required fields are checked for presence, not
+  # only for decode errors: an absent scalar leaves its target untouched.
+  if pbHeader.getRequiredField(1, treeCidBuf).isErr:
     return failure("Unable to decode `treeCid` from manifest!")
 
-  if pbHeader.getField(2, blockSize).isErr:
+  if pbHeader.getRequiredField(2, blockSize).isErr:
     return failure("Unable to decode `blockSize` from manifest!")
 
-  if pbHeader.getField(3, datasetSize).isErr:
+  if pbHeader.getRequiredField(3, datasetSize).isErr:
     return failure("Unable to decode `datasetSize` from manifest!")
 
-  if pbHeader.getField(4, codec).isErr:
+  if pbHeader.getRequiredField(4, codec).isErr:
     return failure("Unable to decode `codec` from manifest!")
 
-  if pbHeader.getField(5, hcodec).isErr:
+  if pbHeader.getRequiredField(5, hcodec).isErr:
     return failure("Unable to decode `hcodec` from manifest!")
 
-  if pbHeader.getField(6, version).isErr:
+  if pbHeader.getRequiredField(6, version).isErr:
     return failure("Unable to decode `version` from manifest!")
+
+  if pbHeader.getRequiredField(10, cidVersion).isErr:
+    return failure("Unable to decode `cidVersion` from manifest!")
 
   if version != ManifestVersionV1:
     return failure("Unsupported manifest version")
 
-  if pbHeader.getField(10, cidVersion).isErr:
-    return failure("Unable to decode `cidVersion` from manifest!")
+  if cidVersion > high(CidVersion).uint32:
+    return failure("Unknown CID version")
 
-  if pbHeader.getField(7, pbErasureInfo).isErr:
+  let
+    codecMc = MultiCodec.codec(codec.int)
+    hcodecMc = MultiCodec.codec(hcodec.int)
+
+  if codecMc == InvalidMultiCodec:
+    return failure("Unknown dataset codec")
+
+  if hcodecMc == InvalidMultiCodec:
+    return failure("Unknown multihash codec")
+
+  # Section presence, not buffer length, decides the manifest kind: a present
+  # but empty required section is malformed, never a kind downgrade.
+  let
+    erasureInfoRes = pbHeader.getField(7, pbErasureInfo)
+    filenameRes = pbHeader.getField(8, filename)
+    mimetypeRes = pbHeader.getField(9, mimetype)
+
+  if erasureInfoRes.isErr:
     return failure("Unable to decode `erasureInfo` from manifest!")
 
-  if pbHeader.getField(8, filename).isErr:
+  if filenameRes.isErr:
     return failure("Unable to decode `filename` from manifest!")
 
-  if pbHeader.getField(9, mimetype).isErr:
+  if mimetypeRes.isErr:
     return failure("Unable to decode `mimetype` from manifest!")
 
-  let protected = pbErasureInfo.buffer.len > 0
-  var verifiable = false
+  var
+    protected = erasureInfoRes.get()
+    verifiable = false
+
   if protected:
-    if pbErasureInfo.getField(1, ecK).isErr:
+    if pbErasureInfo.getRequiredField(1, ecK).isErr:
       return failure("Unable to decode `K` from manifest!")
 
-    if pbErasureInfo.getField(2, ecM).isErr:
+    if pbErasureInfo.getRequiredField(2, ecM).isErr:
       return failure("Unable to decode `M` from manifest!")
 
-    if pbErasureInfo.getField(3, originalTreeCid).isErr:
+    if pbErasureInfo.getRequiredField(3, originalTreeCid).isErr:
       return failure("Unable to decode `originalTreeCid` from manifest!")
 
-    if pbErasureInfo.getField(4, originalDatasetSize).isErr:
+    if pbErasureInfo.getRequiredField(4, originalDatasetSize).isErr:
       return failure("Unable to decode `originalDatasetSize` from manifest!")
-    if pbErasureInfo.getField(5, protectedStrategy).isErr:
+
+    if pbErasureInfo.getRequiredField(5, protectedStrategy).isErr:
       return failure("Unable to decode `protectedStrategy` from manifest!")
 
     if protectedStrategy > high(StrategyType).uint32:
       return failure("Unknown protected strategy")
 
-    if pbErasureInfo.getField(6, pbVerificationInfo).isErr:
+    if originalDatasetSize > high(int64).uint64:
+      return failure("`originalDatasetSize` is not representable")
+
+    let verificationInfoRes = pbErasureInfo.getField(6, pbVerificationInfo)
+    if verificationInfoRes.isErr:
       return failure("Unable to decode `verificationInfo` from manifest!")
 
-    verifiable = pbVerificationInfo.buffer.len > 0
+    verifiable = verificationInfoRes.get()
     if verifiable:
-      if pbVerificationInfo.getField(1, verifyRoot).isErr:
+      if pbVerificationInfo.getRequiredField(1, verifyRoot).isErr:
         return failure("Unable to decode `verifyRoot` from manifest!")
 
       if pbVerificationInfo.getRequiredRepeatedField(2, slotRoots).isErr:
         return failure("Unable to decode `slotRoots` from manifest!")
 
-      if pbVerificationInfo.getField(3, cellSize).isErr:
+      if pbVerificationInfo.getRequiredField(3, cellSize).isErr:
         return failure("Unable to decode `cellSize` from manifest!")
 
-      if pbVerificationInfo.getField(4, verifiableStrategy).isErr:
+      if pbVerificationInfo.getRequiredField(4, verifiableStrategy).isErr:
         return failure("Unable to decode `verifiableStrategy` from manifest!")
 
       if verifiableStrategy > high(StrategyType).uint32:
         return failure("Unknown verifiable strategy")
 
-      if pbVerificationInfo.getField(5, protectedTreeCid).isErr:
+      if pbVerificationInfo.getRequiredField(5, protectedTreeCid).isErr:
         return failure("Unable to decode `protectedTreeCid` from manifest!")
 
-      if pbVerificationInfo.getField(6, protectedDatasetSize).isErr:
+      if pbVerificationInfo.getRequiredField(6, protectedDatasetSize).isErr:
         return failure("Unable to decode `protectedDatasetSize` from manifest!")
+
+      if protectedDatasetSize > high(int64).uint64:
+        return failure("`protectedDatasetSize` is not representable")
+
+  if datasetSize > high(int64).uint64:
+    return failure("`datasetSize` is not representable")
 
   let treeCid = ?Cid.init(treeCidBuf).mapFailure
 
@@ -239,8 +273,8 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         blockSize = blockSize.NBytes,
         version = version,
         cidVersion = cidVersion.CidVersion,
-        hcodec = hcodec.MultiCodec,
-        codec = codec.MultiCodec,
+        hcodec = hcodecMc,
+        codec = codecMc,
         ecK = ecK.int,
         ecM = ecM.int,
         originalTreeCid = ?Cid.init(originalTreeCid).mapFailure,
@@ -256,8 +290,8 @@ proc decode*(_: type Manifest, data: openArray[byte]): ?!Manifest =
         blockSize = blockSize.NBytes,
         version = version,
         cidVersion = cidVersion.CidVersion,
-        hcodec = hcodec.MultiCodec,
-        codec = codec.MultiCodec,
+        hcodec = hcodecMc,
+        codec = codecMc,
         filename = filenameOption,
         mimetype = mimetypeOption,
       )

@@ -30,6 +30,8 @@ func floorLog2*(x: int): int =
 
 func ceilingLog2*(x: int): int =
   doAssert (x > 0)
+  if x == 1:
+    return 0
   return (floorLog2(x - 1) + 1)
 
 func toBlkInSlot*(cell: Natural, numCells: Natural): Natural {.gcsafe.} =

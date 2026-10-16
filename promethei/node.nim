@@ -122,6 +122,11 @@ proc fetchManifest*(
 
   return manifest.success
 
+func slotIndexInManifest(manifest: Manifest, slotIndex: uint64): bool =
+  ## Wire slot indices are validated before narrowing or array access.
+  manifest.verifiable and slotIndex <= int.high.uint64 and
+    slotIndex.int <= manifest.slotRoots.high
+
 proc findPeer*(self: PrometheiNodeRef, peerId: PeerId): Future[?PeerRecord] {.async.} =
   ## Find peer using the discovery service from the given PrometheiNode
   ##
@@ -161,7 +166,7 @@ proc updateSlotExpiry*(
     return failure(error)
 
   # Validate before any mutations
-  if not manifest.verifiable or slotIndex.int > manifest.slotRoots.high:
+  if not slotIndexInManifest(manifest, slotIndex):
     error "Slot not found in manifest", manifestCid, slotIndex
     return failure(newException(PrometheiError, "Slot not found in manifest"))
 
@@ -913,6 +918,11 @@ proc storeSlot*(
     error "Validation of verifiable manifest failed", err = err.msg
     return failure(err)
 
+  # Validate the request before mutating any overlay state
+  if not slotIndexInManifest(manifest, slotIndex):
+    error "Slot index not in manifest", slotIndex = slotIndex
+    return failure(newException(PrometheiError, "Slot index not in manifest"))
+
   if err =? (await self.updateExpiry(manifest, expiry)).errorOption:
     error "Unable to update manifest expiry", cid, err = err.msg
     return failure(err)
@@ -930,14 +940,6 @@ proc storeSlot*(
     ), err:
     error "Unable to create slots builder", err = err.msg
     return failure(err)
-
-  if slotIndex > manifest.slotRoots.high.uint64:
-    error "Slot index not in manifest"
-    return failure(newException(PrometheiError, "Slot index not in manifest"))
-
-  if slotIndex > int.high.uint64:
-    error "Cannot cast slot index to int", slotIndex = slotIndex
-    return failure(newException(PrometheiError, "Cannot cast slot index to int"))
 
   without blksIter =? manifest.getSlotIterator(slotIndex.int), err:
     error "Unable to get indices from strategy", err = err.msg
@@ -1068,8 +1070,13 @@ proc proveSlot*(
   if prover =? self.prover:
     trace "Prover enabled"
 
+    let manifest = ?await self.repoStore.fetchManifest(cid)
+
+    if not slotIndexInManifest(manifest, slotIdx):
+      error "Slot index not in manifest", cid = cid, slotIdx = slotIdx
+      return failure(newException(PrometheiError, "Slot index not in manifest"))
+
     let
-      manifest = ?await self.repoStore.fetchManifest(cid)
       erasure = Erasure.new(
         self.networkStore, self.repoStore, leoEncoderProvider, leoDecoderProvider,
         self.taskpool,
@@ -1118,10 +1125,11 @@ proc deleteSlot*(
 
   let manifest = ?await self.fetchManifest(cid)
 
-  if not manifest.verifiable:
-    warn "Attempting to fail a slot with a non-verifiable manifest", cid, slotIdx
+  if not slotIndexInManifest(manifest, slotIdx):
+    warn "Slot index not in manifest", cid, slotIdx
+    return failure(newException(PrometheiError, "Slot index not in manifest"))
 
-  let slotCid = manifest.slotRoots[slotIdx]
+  let slotCid = manifest.slotRoots[slotIdx.int]
 
   # Delete slot overlay only - tree overlay is shared and left intact
   if err =? (await self.repoStore.dropOverlay(slotCid)).errorOption:

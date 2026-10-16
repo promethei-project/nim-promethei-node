@@ -85,6 +85,13 @@ proc putOverlay*(
       return failure(err)
     record = KVRecord[OverlayMetadata].init(key, OverlayMetadata())
 
+  # Deleting and Finalizing overlays reject ordinary writes, including
+  # expiry-only updates: a finalization in flight must not be overwritten.
+  if overlayRejectsWrites(record.val.status):
+    return failure(
+      newException(OverlayDeletingError, "Overlay is finalizing or deleting")
+    )
+
   self.mergeOverlay(record.val, status, blocks, expiry, manifestCid)
   var cachedOverlay = record.val
   ?await self.metaDs.tryPut(
@@ -94,6 +101,11 @@ proc putOverlay*(
         failed: seq[KVRecord[OverlayMetadata]]
     ): Future[?!seq[KVRecord[OverlayMetadata]]] {.async: (raises: [CancelledError]).} =
       var records = ?await self.metaDs.get(failed.mapIt(it.key), OverlayMetadata)
+      for rec in records.mitems:
+        if overlayRejectsWrites(rec.val.status):
+          return failure(
+            newException(OverlayDeletingError, "Overlay is finalizing or deleting")
+          )
       self.mergeOverlay(records[0].val, status, blocks, expiry, manifestCid)
       cachedOverlay = records[0].val
       success records
@@ -326,20 +338,67 @@ proc dropOverlay*(
 
   success()
 
+proc finishFinalizing(
+    self: RepoStore, treeCid: Cid, status: OverlayStatus, expiry = ZeroSeconds
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  ## Complete a publication or restore a temporary overlay. The stored status
+  ## must be Finalizing on the initial read and on every CAS retry; only
+  ## finalization may transition out of it. A `ZeroSeconds` expiry keeps the
+  ## stored value, which moved metadata already carries.
+  ##
+
+  let key = ?overlayKey(treeCid)
+  self.overlayCache.del(key)
+
+  without var record =? (await self.metaDs.get(key, OverlayMetadata)), err:
+    return failure(err)
+
+  if record.val.status != Finalizing:
+    return failure(newException(OverlayDeletingError, "Overlay is not finalizing"))
+
+  record.val.status = status
+  if expiry != ZeroSeconds:
+    record.val.expiry = expiry
+  var cached = record.val
+
+  ?await self.metaDs.tryPut(
+    record,
+    maxRetries = 10,
+    proc(
+        failed: seq[KVRecord[OverlayMetadata]]
+    ): Future[?!seq[KVRecord[OverlayMetadata]]] {.async: (raises: [CancelledError]).} =
+      var records = ?await self.metaDs.get(failed.mapIt(it.key), OverlayMetadata)
+      for rec in records.mitems:
+        if rec.val.status != Finalizing:
+          return
+            failure(newException(OverlayDeletingError, "Overlay is not finalizing"))
+        rec.val.status = status
+        if expiry != ZeroSeconds:
+          rec.val.expiry = expiry
+      cached = records[0].val
+      success records
+    ,
+  )
+
+  self.overlayCache[key] = cached
+  self.treeShapeCache.del(treeCid)
+  success()
+
 proc finalizeOverlay*(
     self: RepoStore,
     tmpCid, realTreeCid: Cid,
     status = OverlayStatus.none,
     expiry = ZeroSeconds,
-): Future[?!void] {.async: (raises: [CancelledError]).} =
+): Future[?!void] {.async: (raises: []).} =
   ## Promote a temp overlay to a real overlay.
   ##
   ## Atomically moves leaf records, tree records, and overlay metadata from
   ## tmpCid to realTreeCid. The tmp overlay is marked Finalizing before
-  ## the move to reject concurrent writers. After the move, the overlay
-  ## at realTreeCid carries the final status (set via a separate CAS).
+  ## the move to reject concurrent writers, and the destination carries the
+  ## final status before it becomes writable again.
   ##
-  ## Block metadata is unchanged (keyed by blkCid, not treeCid).
+  ## Publication (or its compensation) runs to completion: caller
+  ## cancellation is deferred until the namespace is consistent.
   ##
 
   logScope:
@@ -355,12 +414,20 @@ proc finalizeOverlay*(
   defer:
     self.overlayCache.del(tmpOverlayKey)
     self.treeShapeCache.del(tmpCid)
+    self.overlayCache.del(overlayKey)
+    self.treeShapeCache.del(realTreeCid)
 
   # Read original status, mark Finalizing (rejects new writers), drain in-flight writers.
-  let tmpRecord = ?await self.metaDs.get(tmpOverlayKey, OverlayMetadata)
+  without tmpRecord =?
+      (await noCancel(self.metaDs.get(tmpOverlayKey, OverlayMetadata))),
+    err:
+    return failure(err)
   let tmpOrigStatus = tmpRecord.val.status
-  ?await self.markFinalizing(tmpCid)
-  await self.deletingLock.drain(tmpCid)
+
+  if err =? (await noCancel(self.markFinalizing(tmpCid))).errorOption:
+    return failure(err)
+
+  await noCancel(self.deletingLock.drain(tmpCid))
 
   let expiryTime =
     if expiry == ZeroSeconds:
@@ -371,16 +438,18 @@ proc finalizeOverlay*(
   # Atomically move leaf records, tree records, and overlay metadata.
   # The overlay carries Finalizing status during the move.
   if err =? (
-    await self.metaDs.moveKeysAtomic(
-      @[
-        (?(BlockLeafKey / $tmpCid), ?(BlockLeafKey / $realTreeCid)),
-        (?(TreeNodeKey / $tmpCid), ?(TreeNodeKey / $realTreeCid)),
-        (tmpOverlayKey, overlayKey),
-      ]
+    await noCancel(
+      self.metaDs.moveKeysAtomic(
+        @[
+          (?(BlockLeafKey / $tmpCid), ?(BlockLeafKey / $realTreeCid)),
+          (?(TreeNodeKey / $tmpCid), ?(TreeNodeKey / $realTreeCid)),
+          (tmpOverlayKey, overlayKey),
+        ]
+      )
     )
   ).errorOption:
     if restoreErr =?
-        (await noCancel self.putOverlay(tmpCid, status = tmpOrigStatus.some)).errorOption:
+        (await noCancel(self.finishFinalizing(tmpCid, tmpOrigStatus))).errorOption:
       error "Unable to restore tmp overlay after finalization failure",
         exc = restoreErr.msg
       return failure(restoreErr)
@@ -388,13 +457,38 @@ proc finalizeOverlay*(
     return failure(err)
 
   # Set final status at realTreeCid. The overlay arrived as Finalizing,
-  # so no writers can race. If this CAS fails, data is safe and the real
-  # overlay is visible as Finalizing for retry or repair.
+  # so no writers can race.
   let finalStatus = status |? tmpOrigStatus
   if err =? (
-    await self.putOverlay(realTreeCid, status = finalStatus.some, expiry = expiryTime)
+    await noCancel(self.finishFinalizing(realTreeCid, finalStatus, expiryTime))
   ).errorOption:
     error "Unable to set final overlay status after finalization", exc = err.msg
+
+    # The destination is still Finalizing and rejects ordinary writes;
+    # reverse the move so the temporary namespace is usable again.
+    if inverseErr =? (
+      await noCancel(
+        self.metaDs.moveKeysAtomic(
+          @[
+            (?(BlockLeafKey / $realTreeCid), ?(BlockLeafKey / $tmpCid)),
+            (?(TreeNodeKey / $realTreeCid), ?(TreeNodeKey / $tmpCid)),
+            (overlayKey, tmpOverlayKey),
+          ]
+        )
+      )
+    ).errorOption:
+      error "Unable to reverse namespace move after finalization failure",
+        exc = inverseErr.msg, original = err.msg
+      return failure(inverseErr)
+
+    if restoreErr =?
+        (await noCancel(self.finishFinalizing(tmpCid, tmpOrigStatus))).errorOption:
+      error "Unable to restore tmp overlay after reversed finalization",
+        exc = restoreErr.msg, original = err.msg
+      return failure(restoreErr)
+
+    error "Finalization failed and the temporary namespace was restored",
+      exc = err.msg
     return failure(err)
 
   trace "Temp overlay finalized successfully"
@@ -465,15 +559,12 @@ proc withTmpOverlay*(
     return failure(err)
 
   trace "Body completed successfully, finalizing overlay", realCid, tmpCid
-  # Finalization must run to completion even if the caller is cancelled:
-  # aborting between markFinalizing and the atomic key move would leave the
-  # tmp overlay rejecting writes and deletion forever. noCancel defers the
-  # cancellation until after the move completes; the defer below then sees
-  # the tmp overlay already moved (or deleted) and drops it as a no-op.
+  # Finalization is not cancellable: it owns its cancel schedule, so
+  # cancelling this operation cannot abort between markFinalizing and the
+  # atomic key move. The defer above then sees the tmp overlay already
+  # moved (or deleted) and drops it as a no-op.
   if finalErr =? (
-    await noCancel(
-      self.finalizeOverlay(tmpCid, realCid, status = OverlayStatus.Completed.some)
-    )
+    await self.finalizeOverlay(tmpCid, realCid, status = OverlayStatus.Completed.some)
   ).errorOption:
     error "Unable to finalize tmp overlay", exc = finalErr.msg
     return failure(finalErr)

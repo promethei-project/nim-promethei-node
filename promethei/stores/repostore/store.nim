@@ -147,12 +147,13 @@ proc getBlocksAndProofsImpl(
           warn "Proof generation failed, falling back to stored proofs",
             treeCid, err = proofs.error.msg
 
-  # Collect block data keys from leaf records.
+  # Collect logical entries and unique block data keys from leaf records.
   # leafRecords may be a subset of leafKeys (missing silently skipped).
   # Empty-CID leaves (erasure padding) are synthesized directly without
   # repoDs lookup - they are never stored but callers expect them back.
   var
-    keyToCidProof: Table[Key, (Natural, Cid, ?PrometheiProof)]
+    logicalEntries: seq[(Natural, Key, ?PrometheiProof)]
+    keyToCid: Table[Key, Cid]
     results: seq[(Natural, Block, ?PrometheiProof)]
   for record in leafRecords:
     let blkCid = record.val.blkCid
@@ -171,15 +172,22 @@ proc getBlocksAndProofsImpl(
         else:
           record.val.proof
       key = ?makePrefixKey(self.postFixLen, blkCid)
-    keyToCidProof[key] = (index.Natural, blkCid, proof)
+    logicalEntries.add((index.Natural, key, proof))
+    keyToCid[key] = blkCid
 
-  if keyToCidProof.len > 0:
-    # Batch-fetch block data from FS.
-    var blkRecords = ?await self.repoDs.get(toSeq(keyToCidProof.keys))
+  if keyToCid.len > 0:
+    # Batch-fetch and construct each unique physical block once.
+    var
+      blkRecords = ?await self.repoDs.get(toSeq(keyToCid.keys))
+      keyToBlock: Table[Key, Block]
 
     for record in blkRecords.mitems:
-      let (idx, cid, proof) = ?catch(keyToCidProof[record.key])
-      results.add((idx, ?Block.new(cid, move record.val, verify = false), proof))
+      let cid = ?catch(keyToCid[record.key])
+      keyToBlock[record.key] = ?Block.new(cid, move record.val, verify = false)
+
+    for (index, key, proof) in logicalEntries:
+      keyToBlock.withValue(key, blk):
+        results.add((index, blk[], proof))
 
   trace "Batch got blocks and proofs", found = results.len
   success(results)

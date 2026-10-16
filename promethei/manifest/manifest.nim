@@ -55,6 +55,19 @@ const InnerCodeK* = 1'u32
   # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
 const InnerCodeN* = 2'u32 # inner cell-code total shards N (> K)
 
+const
+  MaxOuterShards* = 65536
+    ## Largest outer code width (ecK + ecM) the v1 layout accepts; also the
+    ## outer encoder's shard limit.
+  MaxLayoutBlocks* = 1 shl 32
+    ## Largest original/protected block count accepted from the wire. Bounds
+    ## every derived layout product inside int64.
+  MaxBlockCells* = 1 shl 20
+    ## Largest number of cells per block. The sampling grid must be a power
+    ## of two; this bound keeps the grid arithmetic inside int64.
+  MaxSlotBlocks* = 1 shl 32
+    ## Largest block count per slot tree (data blocks plus power-of-two pads).
+
 ############################################################
 # Accessors
 ############################################################
@@ -277,6 +290,9 @@ func steps*(self: Manifest): int =
   ## Number of EC groups in *protected* manifest
   divUp(self.rounded, self.ecK)
 
+func isPowerOfTwo(v: int): bool {.inline.} =
+  v > 0 and (v and (v - 1)) == 0
+
 func verify*(self: Manifest): ?!void =
   ## Check manifest correctness
   ##
@@ -290,16 +306,47 @@ func verify*(self: Manifest): ?!void =
       PrometheiError, "Broken manifest: blockSize must be positive"
     )
 
+  if self.datasetSize.int < 0:
+    return failure newException(
+      PrometheiError, "Broken manifest: datasetSize is not representable"
+    )
+
+  # Bound the wire-derived counts before any layout product: a malformed
+  # manifest must fail here rather than overflow later.
+  if self.blocksCount > MaxLayoutBlocks:
+    return failure newException(
+      PrometheiError, "Broken manifest: block count exceeds the supported layout"
+    )
+
   if self.protected:
     if self.ecK <= 0:
       return
         failure newException(PrometheiError, "Broken manifest: ecK must be positive")
+    if self.ecM < 0 or self.ecK + self.ecM > MaxOuterShards:
+      return failure newException(
+        PrometheiError, "Broken manifest: outer code rate not supported"
+      )
     if self.numSlots <= 0:
       return failure newException(
         PrometheiError, "Broken manifest: numSlots must be positive"
       )
 
+    if self.originalDatasetSize.int < 0:
+      return failure newException(
+        PrometheiError, "Broken manifest: originalDatasetSize is not representable"
+      )
+
+    if self.originalBlocksCount > MaxLayoutBlocks or
+        self.protectedBlocksCount > MaxLayoutBlocks:
+      return failure newException(
+        PrometheiError, "Broken manifest: block count exceeds the supported layout"
+      )
+
     if self.verifiable:
+      if self.protectedDatasetSize.int < 0:
+        return failure newException(
+          PrometheiError, "Broken manifest: protectedDatasetSize is not representable"
+        )
       if self.cellSize.int <= 0:
         return failure newException(
           PrometheiError, "Broken manifest: cellSize must be positive"
@@ -308,7 +355,23 @@ func verify*(self: Manifest): ?!void =
         return failure newException(
           PrometheiError, "Broken manifest: blockSize not a multiple of cellSize"
         )
-      if self.numBlockCells == 0 or self.innerK == 0 or self.innerN <= self.innerK or
+
+      # v1 geometry: the sampling grid is indexed by bits, so cells per block
+      # must be a power of two. Whole-row padding cannot make an odd factor
+      # power-of-two, so this is a layout requirement, not a prover one.
+      if self.numBlockCells <= 0 or self.numBlockCells > MaxBlockCells or
+          not isPowerOfTwo(self.numBlockCells):
+        return failure newException(
+          PrometheiError,
+          "Broken manifest: cells per block must be a small power of two",
+        )
+
+      if self.numSlotBlocksTotal > MaxSlotBlocks:
+        return failure newException(
+          PrometheiError, "Broken manifest: blocks per slot exceed the supported layout"
+        )
+
+      if self.innerK == 0 or self.innerN <= self.innerK or
           (self.numBlockCells * self.innerN) mod self.innerK != 0 or
           (self.numSlotBlocksTotal * self.innerN) mod self.innerK != 0:
         return failure newException(
@@ -321,10 +384,12 @@ func verify*(self: Manifest): ?!void =
       )
 
     if self.verifiable:
-      let physicalSize =
-        (self.protectedBlocksCount + self.numSlots * self.parityBlocksPerSlot).NBytes *
-        self.blockSize
-      if self.datasetSize != physicalSize:
+      # Compare block totals through division so the physical byte total
+      # cannot overflow.
+      let totalBlocks =
+        self.protectedBlocksCount + self.numSlots * self.parityBlocksPerSlot
+      if self.datasetSize.int mod self.blockSize.int != 0 or
+          self.datasetSize.int div self.blockSize.int != totalBlocks:
         return failure newException(
           PrometheiError, "Broken manifest: datasetSize does not match layout"
         )

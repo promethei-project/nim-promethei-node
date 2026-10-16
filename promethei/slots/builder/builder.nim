@@ -47,9 +47,6 @@ type SlotsBuilder*[SomeTree, SomeHash] = ref object of RootObj
   verifiableTree: ?SomeTree # verification tree (dataset tree)
   emptyDigestTree: SomeTree # empty digest tree for empty blocks
   erasure: Erasure # 2.5D inner-code encoder
-  parityRoot: ?Cid
-    # root under which parity blocks live (tmpCid during client build;
-    # manifest.treeCid for a provider/verifiable builder)
   verifiableRoot: ?Cid # verifiable sha root, set by buildSlots from the finalize result
 
 func verifiable*[SomeTree, SomeHash](
@@ -201,24 +198,19 @@ proc buildBlockTree*[SomeTree, SomeHash](
 proc getStoredCid*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], root: Cid, index: Natural
 ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
-  ## Leaf CID at `index` under `root`; missing leaf records (erasure
-  ## zero-pads) yield the empty CID.
+  ## Leaf CID at `index` under `root`. A missing leaf record is an error:
+  ## padding is an explicit empty-CID record, never a substitute for
+  ## missing metadata.
   ##
 
-  let res = await self.repoStore.getCid(root, index)
-  if res.isErr:
-    if res.error of BlockNotFoundError:
-      return
-        success(?emptyCid(self.manifest.cidVersion, self.manifest.hcodec, BlockCodec))
-    return failure(res.error)
-  success(res.get)
+  return await self.repoStore.getCid(root, index)
 
 proc buildVerifiableLeafCids*[SomeTree, SomeHash](
-    self: SlotsBuilder[SomeTree, SomeHash]
+    self: SlotsBuilder[SomeTree, SomeHash], parityRoot: Cid
 ): Future[?!ref seq[Cid]] {.async: (raises: [CancelledError]).} =
   ## Leaf CID list for the verifiable tree: protected leaves (position
-  ## order, empty CID for missing records) ++ per-slot parity leaves
-  ## (position order, read from the parity root).
+  ## order; explicit empty-CID records are returned as stored) ++ per-slot
+  ## parity leaves (position order, read from `parityRoot`).
   ##
 
   let
@@ -229,8 +221,6 @@ proc buildVerifiableLeafCids*[SomeTree, SomeHash](
   for idx in 0 ..< protectedCount:
     leafCids[idx] = ?await self.getStoredCid(self.manifest.treeCid, idx.Natural)
 
-  without parityRoot =? self.parityRoot, e:
-    return failure(e)
   for pos in protectedCount ..< leafCids.len:
     leafCids[pos] = ?await self.getStoredCid(parityRoot, pos.Natural)
 
@@ -368,6 +358,14 @@ proc sealSlot*[SomeTree, SomeHash](
     treeCid =? tree.root .? toSlotCid, e:
     error "Failed to build slot tree", e = e.msg
     return failure(e)
+
+  # A verifiable manifest already commits to this slot's root: compare before
+  # persisting anything (the client build seals an uncommitted protected
+  # manifest and has nothing to compare yet).
+  if self.manifest.verifiable and treeCid != self.manifest.slotRoots[slotIndex]:
+    error "Slot root mismatch",
+      manifest = self.manifest.slotRoots[slotIndex], recovered = treeCid
+    return failure(newException(PrometheiError, "Slot root mismatch"))
 
   let
     indices = toSeq(?catch(self.strategy.getIndices(slotIndex)))
@@ -562,15 +560,59 @@ func buildVerifyTree*[SomeTree, SomeHash](
 ): ?!SomeTree =
   SomeTree.init(@slotRoots)
 
+proc allSlotResults[T](
+    futures: seq[Future[?!T]]
+): Future[?!seq[T]] {.async: (raises: [CancelledError]).} =
+  ## Wait for every child future. Successful siblings are always collected;
+  ## the first error is returned only after every unfinished child has been
+  ## cancelled and joined, so no overlay is dropped under a live writer.
+  ##
+
+  var
+    results: seq[T]
+    firstError: ?ref CatchableError
+
+  proc stopUnfinished() {.async: (raises: []).} =
+    for fut in futures:
+      if not fut.finished:
+        fut.cancel()
+    await noCancel(allFutures(futures))
+
+  try:
+    let finished = await allFinished(futures)
+    for fut in finished:
+      if fut.cancelled:
+        if firstError.isNone:
+          firstError = newException(PrometheiError, "Slot build was cancelled").some
+        continue
+
+      if fut.failed:
+        if firstError.isNone:
+          firstError = fut.error.some
+        continue
+
+      let slotRes = fut.read()
+      if slotRes.isOk:
+        results.add(slotRes.get)
+      elif firstError.isNone:
+        firstError = slotRes.error.some
+  except CancelledError as exc:
+    await stopUnfinished()
+    raise exc
+
+  without err =? firstError:
+    success(results)
+  failure(err)
+
 proc buildSlots*[SomeTree, SomeHash](
     self: SlotsBuilder[SomeTree, SomeHash], tp: Taskpool
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ## Build all slot trees and the verifiable tree, and store them.
   ##
   ## Client-construction only: per-slot parity is encoded under a temporary
-  ## overlay, slot trees are sealed as real overlays, and the verifiable sha
-  ## tree over the protected leaves + per-slot parity leaves is finalized
-  ## into the verifiable root (set on `self.verifiableRoot`).
+  ## overlay which is finalized as the verifiable sha root `R_v`; every slot
+  ## tree is then sealed reading that root alone. Builder state is published
+  ## only after all of it succeeded.
   ##
 
   logScope:
@@ -582,65 +624,66 @@ proc buildSlots*[SomeTree, SomeHash](
   if self.slotRoots.len == 0:
     let semaphore = newAsyncSemaphore(DefaultSlotBuildConcurrency)
 
-    var created: seq[Cid]
-
-    proc sealOne(
+    proc encodeOne(
         slotIndex: Natural, tmpCid: Cid
-    ): Future[?!SomeHash] {.async: (raises: [CancelledError]).} =
-      ## Encode the slot's parity under the tmp overlay and seal the slot tree.
+    ): Future[?!seq[Cid]] {.async: (raises: [CancelledError]).} =
+      ## Encode the slot's parity under the temporary overlay.
       await semaphore.acquire()
       try:
-        discard ?await self.encodeSlot(slotIndex, tmpCid, tp)
-        self.parityRoot = tmpCid.some
-        success(?await self.sealSlot(slotIndex, self.manifest.treeCid, tmpCid, tp))
+        success(?await self.encodeSlot(slotIndex, tmpCid, tp))
       finally:
         ?catch(semaphore.release())
 
-    let buildRes = await self.repoStore.withTmpOverlay(
+    proc sealOne(
+        slotIndex: Natural, root: Cid
+    ): Future[?!SomeHash] {.async: (raises: [CancelledError]).} =
+      ## Seal the slot tree against the finalized verifiable root.
+      await semaphore.acquire()
+      try:
+        success(?await self.sealSlot(slotIndex, root, root, tp))
+      finally:
+        ?catch(semaphore.release())
+
+    # Phase 1: all slot parity and the complete verifiable sha tree. The
+    # temporary overlay is finalized by this call, so `R_v` survives any
+    # later failure; no slot tree is written before it returns.
+    let verifiableRootRes = await self.repoStore.withTmpOverlay(
       body = proc(
           tmpCid: Cid
       ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
-        let
-          futures = collect(newSeq):
-            for i in 0 ..< self.manifest.numSlots:
-              sealOne(i.Natural, tmpCid)
-          slotResults = await allFinished(futures)
+        let encodeFutures = collect(newSeq):
+          for i in 0 ..< self.manifest.numSlots:
+            encodeOne(i.Natural, tmpCid)
 
-        var slotRoots: seq[SomeHash]
-        for i, fut in slotResults:
-          if fut.failed:
-            return failure(fut.error)
-          let slotRes = ?catch(fut.read())
-          if slotRes.isErr:
-            return failure(slotRes.error)
-          slotRoots.add(slotRes.get)
-
-        for slotRoot in slotRoots:
-          self.slotRoots.add(slotRoot)
-          without slotCid =? slotRoot.toSlotCid, e:
-            return failure(e)
-          created.add(slotCid)
-
-        without tree =? self.buildVerifyTree(self.slotRoots) and root =? tree.root, e:
-          error "Failed to build slot roots tree", e = e.msg
-          return failure(e)
-        self.verifiableTree = some tree
+        discard ?await allSlotResults(encodeFutures)
 
         # verifiable sha tree over the protected leaves ++ per-slot parity leaves
         success(
           ?await self.erasure.treeAndProofs(
-            ?await self.buildVerifiableLeafCids(), tmpCid
+            ?await self.buildVerifiableLeafCids(tmpCid), tmpCid
           )
         )
     )
 
-    if buildRes.isErr:
-      # drop created slot overlays (withTmpOverlay drops the tmp overlay itself)
-      for c in created:
-        if err =? (await self.repoStore.dropOverlay(c)).errorOption:
-          error "Failed to drop slot overlay on failed build", c = c, err = err.msg
-      return failure(buildRes.error)
-    self.verifiableRoot = buildRes.get.some
+    without shaRoot =? verifiableRootRes, e:
+      return failure(e)
+
+    # Phase 2: seal every slot against the finalized root.
+    let sealFutures = collect(newSeq):
+      for i in 0 ..< self.manifest.numSlots:
+        sealOne(i.Natural, shaRoot)
+
+    without roots =? (await allSlotResults(sealFutures)), e:
+      return failure(e)
+
+    # Phase 3: publish the builder state only now that every step succeeded.
+    without tree =? self.buildVerifyTree(roots) and root =? tree.root, e:
+      error "Failed to build slot roots tree", e = e.msg
+      return failure(e)
+
+    self.slotRoots = roots
+    self.verifiableTree = some tree
+    self.verifiableRoot = shaRoot.some
   else:
     without tree =? self.buildVerifyTree(self.slotRoots) and root =? tree.root, e:
       error "Failed to build slot roots tree", e = e.msg
@@ -785,6 +828,5 @@ proc new*[SomeTree, SomeHash](
 
     self.slotRoots = slotRoots
     self.verifiableTree = some tree
-    self.parityRoot = manifest.treeCid.some
 
   success self
