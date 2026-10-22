@@ -53,7 +53,7 @@ suite "Test NimGoth16 Backend - control inputs":
     check (await nimGroth16.verify(proof)).tryGet
 
   test "Should not verify with incorrect inputs":
-    proofInputs.slotIndex = 1 # change slot index
+    proofInputs.slotIndex = proofInputs.nSlotsPerDataSet # out of range
 
     let proof = (await nimGroth16.prove(proofInputs)).tryGet
     check (await nimGroth16.verify(proof)).tryGet == false
@@ -114,7 +114,7 @@ suite "Test NimGoth16 Backend":
     check (await nimGroth16.verify(proof)).tryGet
 
   test "Should not verify with incorrect input":
-    proofInputs.slotIndex = 1 # change slot index
+    proofInputs.slotIndex = proofInputs.nSlotsPerDataSet # out of range
 
     let proof = (await nimGroth16.prove(proofInputs)).tryGet
     check (await nimGroth16.verify(proof)).tryGet == false
