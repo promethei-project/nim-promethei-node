@@ -12,7 +12,7 @@ export results
 type
   PrometheiError* = object of CatchableError # base error
 
-  FinishedFailed*[T] = tuple[success: seq[Future[T]], failure: seq[Future[T]]]
+  FinishedFailed*[T] = tuple[success: seq[T], failure: seq[ref CatchableError]]
 
 template mapFailure*[T, V, E](
     exp: Result[T, V], exc: typedesc[E]
@@ -44,13 +44,13 @@ proc allFinishedFailed*[T](
   ## we should probably avoid the async transform
   ##
 
-  var res: FinishedFailed[T] = (@[], @[])
+  var res: FinishedFailed[T]
   await allFutures(futs)
   for f in futs:
     if f.failed or f.cancelled:
-      res.failure.add f
+      res.failure.add f.error
     else:
-      res.success.add f
+      res.success.add f.value
 
   return res
 

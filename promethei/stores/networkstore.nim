@@ -74,7 +74,9 @@ method getBlocks*(
     (succeeded, failed) = await allFinishedFailed[BlockDelivery](deliveries)
 
   promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  let networkBlocks = succeeded.mapIt(it.value.blk)
+  var networkBlocks = newSeqOfCap[Block](succeeded.len)
+  for delivery in succeeded:
+    networkBlocks.add delivery.blk
   success(localBlocks & networkBlocks)
 
 method getBlock*(
@@ -149,7 +151,9 @@ method getBlocks*(
     (succeeded, failed) = await allFinishedFailed[BlockDelivery](treeDeliveries)
 
   promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  let treeNetworkBlocks = succeeded.mapIt((it.value.address.index, it.value.blk))
+  var treeNetworkBlocks = newSeqOfCap[(Natural, Block)](succeeded.len)
+  for delivery in succeeded:
+    treeNetworkBlocks.add((delivery.address.index, delivery.blk))
   success(localBlocks & treeNetworkBlocks)
 
 method completeBlocks*(
@@ -331,10 +335,10 @@ method getBlocksAndProofs*(
   var blocks: seq[(Natural, Block, ?PrometheiProof)]
   let
     deliveries = ?self.engine.requestDeliveries(addresses)
-    (succeeded, failed) = await allFinishedFailed[BlockDelivery](deliveries)
+    (delivered, failed) = await allFinishedFailed[BlockDelivery](deliveries)
 
   promethei_networkstore_blocks_missed.inc(failed.len.int64)
-  for delivery in succeeded.mapIt(it.value):
+  for delivery in delivered:
     if not delivery.address.leaf:
       warn "Skipping non-leaf delivery for leaf request", address = delivery.address
       continue

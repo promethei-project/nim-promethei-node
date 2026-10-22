@@ -347,9 +347,9 @@ proc cancelBlocks(
   for peerId, addresses in scheduledCancellations:
     futures.add(dispatchCancellations(peerId, addresses))
 
-  let (_, failedFuts) = await allFinishedFailed[PeerId](futures)
-  if failedFuts.len > 0:
-    warn "Failed to send block request cancellations to peers", peers = failedFuts.len
+  let (_, failed) = await allFinishedFailed[PeerId](futures)
+  if failed.len > 0:
+    warn "Failed to send block request cancellations to peers", peers = failed.len
 
 proc resolveBlocks*(
     self: BlockExcEngine, blocksDelivery: seq[BlockDelivery], sender: ?BlockExcPeerCtx

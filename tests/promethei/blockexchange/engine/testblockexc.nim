@@ -402,6 +402,6 @@ asyncchecksuite "NetworkStore - multiple nodes":
     let (succeeded, failed) = await allFinishedFailed[int](@[good, bad])
 
     check succeeded.len == 1
-    check succeeded[0].value == 42
+    check succeeded[0] == 42
     check failed.len == 1
-    check failed[0].cancelled
+    check failed[0] of CancelledError
