@@ -2,6 +2,7 @@
 
 import std/sequtils
 import std/sets
+import std/tables
 
 import pkg/iter
 import pkg/chronos
@@ -205,15 +206,28 @@ method putCidsAndProofs*(
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ?await self.localStore.putCidsAndProofs(treeCid, items)
 
-  let storedItems =
-    ?await self.localStore.getBlocksAndProofs(treeCid, items.mapIt(it[0]))
+  if items.len == 0:
+    return success()
+
+  # Payload-only read: proofs are already stored, so do not regenerate them
+  # just to announce the blocks. Missing payloads remain best-effort
+  # omissions; actual read failures propagate.
+  var
+    indices = newSeqOfCap[Natural](items.len)
+    proofByIndex = initTable[Natural, PrometheiProof]()
+  for (index, _, proof) in items:
+    indices.add index
+    proofByIndex[index] = proof
+  let blocks = ?await self.localStore.getBlocks(treeCid, indices)
+
   var deliveries: seq[BlockDelivery]
-  for item in storedItems:
-    deliveries.add(
-      BlockDelivery(
-        address: BlockAddress.init(treeCid, item[0]), blk: item[1], proof: item[2]
+  for (index, blk) in blocks:
+    proofByIndex.withValue(index, proof):
+      deliveries.add(
+        BlockDelivery(
+          address: BlockAddress.init(treeCid, index), blk: blk, proof: proof[].some
+        )
       )
-    )
 
   if deliveries.len > 0:
     await self.engine.completeBlocks(deliveries)

@@ -29,6 +29,14 @@ export backend
 logScope:
   topics = "promethei erasure"
 
+const
+  DefaultPayloadIOTarget* = 64 * 1024 * 1024
+  DefaultProofMetadataTarget* = 1024 * 1024
+
+func proofRecordBytes*(cid: Cid, proof: PrometheiProof): int =
+  ## Conservative per-record accounting for proof-publication batches.
+  cid.data.len + 64 + proof.path.len * 64
+
 type
   ## Encode a manifest into one that is erasure protected.
   ##
@@ -185,8 +193,7 @@ proc prepareEncodingData(
     # Leopard copies bufSize bytes regardless of the buffer's real length;
     # a short (or over-long) block must fail here, not corrupt the encode.
     if (not blk.isEmpty) and blk.data.len != params.blockSize.int:
-      return
-        failure("Block length does not match manifest blockSize, idx: " & $idx)
+      return failure("Block length does not match manifest blockSize, idx: " & $idx)
     data[pos] = if blk.isEmpty: emptyBlock else: blk.data
     cids[idx] = blk.cid
 
@@ -406,7 +413,7 @@ proc encodeStripes*(
   except SpawnContractError as e:
     return failure(e)
 
-  success parity
+  success move parity
 
 proc encodeData(
     self: Erasure, originalTreeCid: Cid, tmpTreeCid: Cid, params: EncodingParams
@@ -477,15 +484,23 @@ proc encodeData(
   success cids
 
 proc treeAndProofs*(
-    self: Erasure, cids: ref seq[Cid], targetCid: Cid, expectedRoot = Cid.none
+    self: Erasure,
+    cids: ref seq[Cid],
+    targetCid: Cid,
+    blockSize: NBytes,
+    payloadTarget: int,
+    proofMetadataTarget: int,
+    expectedRoot = Cid.none,
 ): Future[?!Cid] {.async: (raises: [CancelledError]).} =
-  ## Build a tree over `cids`, store per-leaf proofs under `targetCid`,
-  ## and return the tree root. When `expectedRoot` is provided, the built
-  ## root is compared against it BEFORE anything is stored - a mismatch
-  ## fails without committing proofs.
+  ## Build a tree over `cids`, store per-leaf proofs under `targetCid` in
+  ## bounded batches, and return the tree root. When `expectedRoot` is
+  ## provided, the built root is compared against it BEFORE anything is
+  ## stored - a mismatch fails without committing proofs.
   ##
   if cids[].len == 0:
     return failure "Empty leaves"
+  if blockSize.int <= 0 or payloadTarget <= 0 or proofMetadataTarget <= 0:
+    return failure "Invalid proof publication limits"
 
   proc liftCid(cid: Cid): Future[Cid] {.async.} =
     cid
@@ -503,14 +518,30 @@ proc treeAndProofs*(
     treeCid = ?tree.rootCid
 
   if (n =? expectedRoot) and treeCid != n:
-    return
-      failure "Rebuilt tree root does not match the committed root; nothing stored"
+    return failure "Rebuilt tree root does not match the committed root; nothing stored"
 
-  var proofItems: seq[(Natural, Cid, PrometheiProof)]
+  var
+    proofItems: seq[(Natural, Cid, PrometheiProof)]
+    proofBytes = 0
+
   for index, cid in cids[]:
-    proofItems.add((index.Natural, cid, ?tree.getProof(index)))
+    let
+      proof = ?tree.getProof(index)
+      recordBytes = proofRecordBytes(cid, proof)
 
-  ?await self.networkStore.putCidsAndProofs(targetCid, proofItems)
+    if proofItems.len > 0 and (
+      proofBytes + recordBytes > proofMetadataTarget or
+      (proofItems.len + 1) * blockSize.int > payloadTarget
+    ):
+      ?await self.networkStore.putCidsAndProofs(targetCid, proofItems)
+      proofItems.setLen(0)
+      proofBytes = 0
+
+    proofItems.add((index.Natural, cid, proof))
+    proofBytes += recordBytes
+
+  if proofItems.len > 0:
+    ?await self.networkStore.putCidsAndProofs(targetCid, proofItems)
 
   trace "Tree and proofs stored", treeCid
   success treeCid
@@ -551,10 +582,14 @@ proc encode*(
             ?await self.encodeData(sourceManifest.treeCid, manifest.treeCid, params)
           success(
             ?await self.treeAndProofs(
-              cids, manifest.treeCid, expectedRoot = manifest.treeCid.some
+              cids,
+              manifest.treeCid,
+              sourceManifest.blockSize,
+              DefaultPayloadIOTarget,
+              DefaultProofMetadataTarget,
+              expectedRoot = manifest.treeCid.some,
             )
-          )
-        ,
+          ),
       )
     else:
       ?await self.repoStore.withTmpOverlay(
@@ -563,7 +598,12 @@ proc encode*(
         ): Future[?!Cid] {.closure, gcsafe, async: (raises: [CancelledError]).} =
           let cids = ?await self.encodeData(sourceManifest.treeCid, tmpCid, params)
 
-          success(?await self.treeAndProofs(cids, tmpCid))
+          success(
+            ?await self.treeAndProofs(
+              cids, tmpCid, sourceManifest.blockSize, DefaultPayloadIOTarget,
+              DefaultProofMetadataTarget,
+            )
+          )
       )
 
   let protected = Manifest.new(

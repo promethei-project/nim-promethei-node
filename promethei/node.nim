@@ -1007,8 +1007,9 @@ proc storeSlot*(
       fetchLocal = false,
     )
 
-    for s in 0 ..< manifest.numSlots:
-      discard ?await builder.encodeSlot(s.Natural, manifest.treeCid, self.taskpool)
+    for slotNumber in 0 ..< manifest.numSlots:
+      discard
+        ?await builder.encodeSlot(slotNumber.Natural, manifest.treeCid, self.taskpool)
 
     # Mint R_v proofs for the WHOLE tree: with the full leaf-cid list
     # local, storing every leaf's proof (and tree nodes) makes this node a
@@ -1023,9 +1024,15 @@ proc storeSlot*(
       allCids[][idx] = ?emptyCid(manifest.cidVersion, manifest.hcodec, BlockCodec)
     # Compare before commit: nothing is stored if the rebuilt root
     # diverges from the committed one.
-    discard ?await erasure.treeAndProofs(
-      allCids, manifest.treeCid, expectedRoot = manifest.treeCid.some
-    )
+    discard
+      ?await erasure.treeAndProofs(
+        allCids,
+        manifest.treeCid,
+        manifest.blockSize,
+        DefaultPayloadIOTarget,
+        DefaultProofMetadataTarget,
+        expectedRoot = manifest.treeCid.some,
+      )
   else:
     if err =? (await self.fetchBatched(manifest.treeCid, blksIter)).errorOption:
       error "Unable to fetch blocks", err = err.msg
