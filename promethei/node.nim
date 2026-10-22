@@ -316,16 +316,6 @@ proc streamEntireDataset(
 
   var jobs: seq[Future[void]]
 
-  # Outer-EC geometry must come from the protected view: the verifiable
-  # manifest's blocksCount counts 2.5D physical leaves, which over-iterates
-  # the outer strategy by the inner parity. Derived synchronously so a
-  # malformed manifest fails the retrieval instead of a background job.
-  let decodeTarget =
-    if manifest.verifiable:
-      ?manifest.protectedView
-    else:
-      manifest
-
   let stream = LPStream(StoreStream.new(self.networkStore, manifest, pad = false))
   if manifest.protected:
     # For protected manifests, erasure.decode owns the overlay lifecycle
@@ -338,14 +328,9 @@ proc streamEntireDataset(
           self.taskpool,
         )
 
-        # A verifiable dataset's shards are served under the verifiable
-        # root; the protected view only supplies the outer-EC geometry.
-        let fetchRoot =
-          if manifest.verifiable:
-            some(manifest.treeCid)
-          else:
-            Cid.none
-        if err =? (await erasure.decode(decodeTarget, fetchRoot)).errorOption:
+        # decode derives the outer-EC geometry from the protected view and
+        # addresses the shards under the manifest's own tree root.
+        if err =? (await erasure.decode(manifest)).errorOption:
           error "Unable to erasure decode manifest", manifestCid, exc = err.msg
           return
       except CatchableError as exc:
@@ -968,17 +953,11 @@ proc storeSlot*(
     # (the only root peers can prove; the protected dataset is its prefix at
     # identical indices), reconstruct the original blocks and re-encode the
     # outer parity into the protected view.
-    if err =? (await erasure.repair(protected, manifest.treeCid.some)).errorOption:
+    if err =? (await erasure.repair(manifest)).errorOption:
       error "Unable to erasure repair protected dataset",
         cid = protected.treeCid, exc = err.msg
       return failure(err)
 
-    # Bring the entire verifiable tree down: re-seed this slot's data leaves
-    # (originals from the decoded original tree, outer parity from the
-    # re-encoded protected view), fetch every remaining data leaf from
-    # peers, and regenerate every slot's inner parity - it is deterministic
-    # from the slot's data, so encoding all slots completes the full
-    # leaf-cid list even when the original slot holders are gone.
     ?await self.repoStore.withOverlay(
       manifest.treeCid,
       status = Repairing.some,

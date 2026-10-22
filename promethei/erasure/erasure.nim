@@ -283,8 +283,8 @@ proc prepareDecodingData(
     # Leopard copies bufSize bytes regardless of the buffer's real length;
     # a short (or over-long) block must fail here, not corrupt the decode.
     if (not blk.isEmpty) and blk.data.len != params.blockSize.int:
-      return
-        failure("Block length does not match manifest blockSize, idx: " & $idx)
+      return failure("Block length does not match manifest blockSize, idx: " & $idx)
+
     if idx < params.rounded and pos >= params.ecK:
       error "Data block position exceeds ecK", pos, idx, step
       return failure("Data block position exceeds ecK")
@@ -655,20 +655,19 @@ proc decodeStripes*(
   var
     shardLen = 0
     pieces = 0
+
+  template tallyShard(shard: untyped) =
+    if shard.len > 0:
+      if shardLen == 0:
+        shardLen = shard.len
+      elif shard.len != shardLen:
+        return failure "Mismatched shard lengths in decodeStripes"
+      inc pieces
+
   for shard in data:
-    if shard.len > 0:
-      if shardLen == 0:
-        shardLen = shard.len
-      elif shard.len != shardLen:
-        return failure "Mismatched shard lengths in decodeStripes"
-      inc pieces
+    tallyShard shard
   for shard in parity:
-    if shard.len > 0:
-      if shardLen == 0:
-        shardLen = shard.len
-      elif shard.len != shardLen:
-        return failure "Mismatched shard lengths in decodeStripes"
-      inc pieces
+    tallyShard shard
 
   if shardLen == 0:
     return failure "No shards to decode"
@@ -690,16 +689,16 @@ proc decodeStripes*(
 
   # Decode on the taskpool: the recovered data shards return through the
   # spawnJoin result channel, no GC refs cross the boundary.
-  try:
-    recovered =
+  recovered =
+    try:
       ?await spawnJoin(
         proc(ctx: SharedPtr[TaskCtx[seq[seq[byte]]]]) {.gcsafe, raises: [].} =
           self.taskPool.spawn leopardDecodeTask(
             ctx, addr self, shardLen, addr d, addr p
           )
       )
-  except SpawnContractError as e:
-    return failure(e)
+    except SpawnContractError as e:
+      return failure(e)
 
   # leopard fills `recovered` only at erasure positions; the present
   # shards pass through unchanged
@@ -707,7 +706,7 @@ proc decodeStripes*(
     if d[i].len > 0:
       recovered[i] = move d[i]
 
-  success recovered
+  success move recovered
 
 proc decodeInternal(
     self: Erasure, encodedTreeCid: Cid, targetCid: Cid, params: EncodingParams
@@ -786,21 +785,26 @@ proc decodeInternal(
   return (cids, recoveredIndices).success
 
 proc decode*(
-    self: Erasure, encoded: Manifest, fetchFrom = Cid.none
+    self: Erasure, manifest: Manifest
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
-  ## Decode a protected manifest into it's original
-  ## manifest
+  ## Decode a dataset into its original manifest
   ##
-  ## `encoded` - the encoded (protected) manifest to
-  ##             be recovered
-  ##
-  ## `fetchFrom` - root to fetch the encoded shards from, when it differs
-  ##             from `encoded.treeCid` (a verifiable dataset's shards are
-  ##             served under the verifiable root).
+  ## `manifest` - the dataset's manifest: a protected manifest, or a
+  ##              verifiable one whose protected view supplies the outer-EC
+  ##              geometry. Shards are addressed under the manifest's own
+  ##              tree root - the namespace peers serve and prove.
   ##
 
+  # The outer-EC geometry is only defined on the protected view; a
+  # verifiable manifest is addressed by its enlarged R_v, not by it.
+  let encoded =
+    if manifest.verifiable:
+      ?manifest.protectedView
+    else:
+      manifest
+
   logScope:
-    treeCid = encoded.treeCid
+    treeCid = manifest.treeCid
     originalTreeCid = encoded.originalTreeCid
 
   trace "Preparing to decode dataset"
@@ -808,7 +812,6 @@ proc decode*(
   let
     emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
-    fetchRoot = fetchFrom |? encoded.treeCid
 
   var
     cids: ref seq[Cid]
@@ -820,7 +823,7 @@ proc decode*(
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, recoveredIndices) =
-          ?await self.decodeInternal(fetchRoot, encoded.originalTreeCid, params)
+          ?await self.decodeInternal(manifest.treeCid, encoded.originalTreeCid, params)
         tree =
           # sync build: root comparison only (decode paths do not stream)
           ?PrometheiTree.init(cids[0 ..< encoded.originalBlocksCount])
@@ -845,19 +848,17 @@ proc decode*(
   return decoded.success
 
 proc repair*(
-    self: Erasure, encoded: Manifest, fetchFrom = Cid.none
+    self: Erasure, manifest: Manifest
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
-  ## Repair a protected manifest by reconstructing the full dataset
+  ## Repair a dataset by reconstructing the full protected dataset
   ##
-  ## `encoded` - the encoded (protected) manifest to
-  ##             be repaired
-  ##
-  ## `fetchFrom` - root to fetch the encoded shards from, when it differs
-  ##             from `encoded.treeCid`. A provider repairing a slot of a
-  ##             verifiable dataset can only fetch (and prove) under the
-  ##             verifiable root - the protected tree's blocks are its
-  ##             prefix at identical indices - while reconstruction and
-  ##             re-encoding stay addressed by `encoded`.
+  ## `manifest` - the dataset's manifest: a protected manifest, or a
+  ##              verifiable one whose protected view supplies the outer-EC
+  ##              geometry. Shards are addressed under the manifest's own
+  ##              tree root, where peers can fetch and prove them; the
+  ##              protected tree's blocks are its prefix at identical
+  ##              indices, while reconstruction and re-encoding stay
+  ##              addressed by the protected view.
   ##
   ## TODO: there are several quirks to be aware of here -
   ## decode can only recreate original blocks, the resulting
@@ -871,17 +872,23 @@ proc repair*(
   ## to avoid leaving garbage in the store
   ##
 
+  # The outer-EC geometry is only defined on the protected view; a
+  # verifiable manifest is addressed by its enlarged R_v, not by it.
+  let encoded =
+    if manifest.verifiable:
+      ?manifest.protectedView
+    else:
+      manifest
+
   logScope:
-    treeCid = encoded.treeCid
+    treeCid = manifest.treeCid
     originalTreeCid = encoded.originalTreeCid
-    fetchFrom = fetchFrom
 
   trace "Preparing to repair dataset"
 
   let
     emptyCid = ?emptyCid(encoded.cidVersion, encoded.hcodec, encoded.codec)
     params = EncodingParams.initFromEncoded(encoded, emptyCid)
-    fetchRoot = fetchFrom |? encoded.treeCid
 
   ?await self.repoStore.withOverlay(
     encoded.originalTreeCid,
@@ -889,7 +896,7 @@ proc repair*(
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, _) =
-          ?await self.decodeInternal(fetchRoot, encoded.originalTreeCid, params)
+          ?await self.decodeInternal(manifest.treeCid, encoded.originalTreeCid, params)
         tree =
           # sync build: root comparison only (decode paths do not stream)
           ?PrometheiTree.init(cids[0 ..< encoded.originalBlocksCount])
