@@ -257,6 +257,7 @@ suite "BlockMaintainer":
         verifiablePhysicalSize(protManifest),
         Cid.example,
         slotRoots,
+        cellSize = protManifest.blockSize,
       )
       .tryGet()
 

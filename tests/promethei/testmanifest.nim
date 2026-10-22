@@ -1,6 +1,6 @@
 import pkg/chronos
 import pkg/questionable/results
-import pkg/libp2p/protobuf/minprotobuf
+import pkg/libp2p/[cid, protobuf/minprotobuf]
 import std/sequtils
 import pkg/promethei/chunker
 import pkg/promethei/blocktype as bt
@@ -159,7 +159,9 @@ suite "Manifest - Attribute Inheritance":
 
     check:
       dataPerSlot == 5
-      parityPerSlot == 3 * (dataPerSlot + verifiable.numPadSlotBlocks)
+      dataPerSlot + verifiable.numPadSlotBlocks == verifiable.numSlotBlocksTotal
+      parityPerSlot ==
+        verifiable.firstPassParityBlocks + verifiable.secondPassParityBlocks
 
     for slot in 0 ..< verifiable.numSlots:
       let iter = verifiable.getSlotIterator(slot).tryGet()
@@ -225,8 +227,8 @@ suite "Manifest - Attribute Inheritance":
     check:
       decoded.version == ManifestVersionV1
       decoded.cidVersion == protected.cidVersion
-      decoded.innerK == 1 # layout-version constant (bring-up rate 1:2)
-      decoded.innerN == 2
+      decoded.innerK == InnerCodeK.int
+      decoded.innerN == InnerCodeN.int
       decoded.treeCid == verifiable.treeCid
       decoded.datasetSize == verifiableSize
       decoded.blocksCount == verifiable.blocksCount
@@ -234,21 +236,27 @@ suite "Manifest - Attribute Inheritance":
       decoded.protectedDatasetSize == protected.datasetSize
 
   test "Reject unsupported manifest version on decode":
-    var header = initProtoBuffer()
-    header.write(1, Cid.example.data.buffer)
-    header.write(2, 1.MiBs.uint32)
-    header.write(3, 100.MiBs.uint64)
-    header.write(4, BlockCodec.uint32)
-    header.write(5, Sha256HashCodec.uint32)
-    header.write(6, 2'u32) # unsupported version
-    header.finish()
-    var pbNode = initProtoBuffer()
-    pbNode.write(1, header)
-    pbNode.finish()
+    proc decodeWith(version: uint32): ?!Manifest =
+      var header = initProtoBuffer()
+      header.write(1, Cid.example.data.buffer)
+      header.write(2, 1.MiBs.uint32)
+      header.write(3, 100.MiBs.uint64)
+      header.write(4, BlockCodec.uint32)
+      header.write(5, Sha256HashCodec.uint32)
+      header.write(6, version)
+      header.write(10, CIDv1.uint32)
+      header.finish()
+      var pbNode = initProtoBuffer()
+      pbNode.write(1, header)
+      pbNode.finish()
+      Manifest.decode(pbNode.buffer)
 
-    let decoded = Manifest.decode(pbNode.buffer)
-    check decoded.isErr
-    check decoded.error.msg == "Unsupported manifest version"
+    # The identical header decodes with the supported version, so the
+    # rejection below is the version check rather than a missing field.
+    let manifest = decodeWith(ManifestVersionV1).tryGet
+    check manifest.version == ManifestVersionV1
+
+    check decodeWith(2'u32).isErr
 
   test "Verify uses the protected blocks count for verifiable manifests":
     # top-level datasetSize is the physical (enlarged) size; verify must
@@ -299,12 +307,20 @@ suite "Manifest - Attribute Inheritance":
       .tryGet()
 
     check:
-      verifiable.innerK == 1
-      verifiable.innerN == 2
-      verifiable.rowShards == verifiable.numBlockCells * 2
-      verifiable.colShards == verifiable.numSlotBlocksTotal * 2
-      verifiable.firstPassParityBlocks == verifiable.numSlotBlocksTotal
-      verifiable.parityBlocksPerSlot == 3 * verifiable.numSlotBlocksTotal
+      verifiable.innerK == InnerCodeK.int
+      verifiable.innerN == InnerCodeN.int
+      verifiable.rowShards ==
+        verifiable.numBlockCells * verifiable.innerN div verifiable.innerK
+      verifiable.colShards ==
+        verifiable.numSlotBlocksTotal * verifiable.innerN div verifiable.innerK
+      verifiable.firstPassParityBlocks ==
+        (
+          verifiable.numSlotBlocksTotal *
+          (verifiable.rowShards - verifiable.numBlockCells) + verifiable.numBlockCells -
+          1
+        ) div verifiable.numBlockCells
+      verifiable.parityBlocksPerSlot ==
+        verifiable.firstPassParityBlocks + verifiable.secondPassParityBlocks
 
   test "Protected view exposes the protected root for repair addressing":
     let

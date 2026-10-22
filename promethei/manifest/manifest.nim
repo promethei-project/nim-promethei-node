@@ -15,6 +15,31 @@ import ../blocktype
 import ../indexingstrategy
 import ../logutils
 
+const
+  ManifestVersionV1* = 1'u32 ## v1.0.0: fixes the parity packing
+  prometheiInnerK {.intdefine.} = 1
+    ## inner cell-code data shards K; the ONLY place the rate is defined.
+    ## Development builds may override it with `-d:prometheiInnerK=<int>`.
+  prometheiInnerN {.intdefine.} = 2
+    ## inner cell-code total shards N (> K), overridable with
+    ## `-d:prometheiInnerN=<int>`.
+  InnerCodeK* = uint32(prometheiInnerK)
+  InnerCodeN* = uint32(prometheiInnerN)
+
+  MaxOuterShards* = 65536
+    ## Largest outer code width (ecK + ecM) the v1 layout accepts; also the
+    ## outer encoder's shard limit.
+  MaxInnerShards* = 65536
+    ## Largest data plus parity shard count accepted by the inner encoder.
+  MaxLayoutBlocks* = 1 shl 32
+    ## Largest original/protected block count accepted from the wire. Bounds
+    ## every derived layout product inside int64.
+  MaxBlockCells* = 1 shl 20
+    ## Largest number of cells per block. The sampling grid must be a power
+    ## of two; this bound keeps the grid arithmetic inside int64.
+  MaxSlotBlocks* = 1 shl 32
+    ## Largest block count per slot tree (data blocks plus power-of-two pads).
+
 # TODO: Manifest should be reworked to more concrete types,
 # perhaps using inheritance
 type Manifest* = ref object of RootObj
@@ -49,24 +74,6 @@ type Manifest* = ref object of RootObj
       discard
   else:
     discard
-
-const ManifestVersionV1* = 1'u32 # v1.0.0: fixes the inner rate and parity packing (CID version is not part of the layout)
-const InnerCodeK* = 1'u32
-  # inner cell-code data shards K; bring-up rate 1:2 - the ONLY place the rate is defined
-const InnerCodeN* = 2'u32 # inner cell-code total shards N (> K)
-
-const
-  MaxOuterShards* = 65536
-    ## Largest outer code width (ecK + ecM) the v1 layout accepts; also the
-    ## outer encoder's shard limit.
-  MaxLayoutBlocks* = 1 shl 32
-    ## Largest original/protected block count accepted from the wire. Bounds
-    ## every derived layout product inside int64.
-  MaxBlockCells* = 1 shl 20
-    ## Largest number of cells per block. The sampling grid must be a power
-    ## of two; this bound keeps the grid arithmetic inside int64.
-  MaxSlotBlocks* = 1 shl 32
-    ## Largest block count per slot tree (data blocks plus power-of-two pads).
 
 ############################################################
 # Accessors
@@ -180,8 +187,14 @@ func numBlockCells*(self: Manifest): int =
   self.blockSize.int div cellSize.int
 
 func numPadSlotBlocks*(self: Manifest): int =
-  nextPowerOfTwo(self.dataBlocksPerSlot * self.numBlockCells) div self.numBlockCells -
-    self.dataBlocksPerSlot
+  ## Whole input rows needed to satisfy both the power-of-two sampling grid
+  ## and the compiled inner rate. All candidate rates are qualified with
+  ## this same rule; no slot is rejected for being small.
+  let
+    dataBlocks = self.dataBlocksPerSlot
+    minBlocks = self.innerK
+
+  max(nextPowerOfTwo(dataBlocks), minBlocks) - dataBlocks
 
 func numSlotBlocksTotal*(self: Manifest): int =
   self.dataBlocksPerSlot + self.numPadSlotBlocks
@@ -376,6 +389,42 @@ func verify*(self: Manifest): ?!void =
           (self.numSlotBlocksTotal * self.innerN) mod self.innerK != 0:
         return failure newException(
           PrometheiError, "Broken manifest: inner code rate not supported"
+        )
+
+      # These are hard limits of the Leopard encoder used by the builder.
+      # Reject them before any slot data is fetched or allocated.
+      if self.cellSize.int mod 64 != 0:
+        return failure newException(
+          PrometheiError, "Broken manifest: cell size must be a multiple of 64 bytes"
+        )
+
+      if self.innerN - self.innerK > self.innerK:
+        return failure newException(
+          PrometheiError, "Broken manifest: too many inner parity shards"
+        )
+
+      if self.rowShards > MaxInnerShards or self.colShards > MaxInnerShards:
+        return failure newException(
+          PrometheiError, "Broken manifest: inner shard count exceeds the encoder limit"
+        )
+
+      # The sampling grid is indexed by bits, so the padded block count must
+      # stay a power of two and cover at least the rate's K input rows. The
+      # circuit represents one index in `maxDepth` bits; reject layouts that
+      # could not be sampled before any builder allocates for them.
+      if not isPowerOfTwo(self.numSlotBlocksTotal) or
+          self.numSlotBlocksTotal < self.innerK:
+        return failure newException(
+          PrometheiError, "Broken manifest: padded slot geometry is not supported"
+        )
+
+      let
+        parityBlocks = self.parityBlocksPerSlot
+        sampleCells = (self.numSlotBlocksTotal + parityBlocks) * self.numBlockCells
+
+      if sampleCells <= 0 or sampleCells > (1 shl 32):
+        return failure newException(
+          PrometheiError, "Broken manifest: slot sampling space is not supported"
         )
 
     if self.protectedBlocksCount != self.steps * (self.ecK + self.ecM):
