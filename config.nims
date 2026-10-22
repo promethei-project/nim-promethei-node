@@ -24,3 +24,7 @@ when defined(release):
     switch("define", "lto_incremental")
     switch("passC", "-flto")
     switch("passL", "-flto")
+# begin Nimble config (version 2)
+when withDir(thisDir(), system.fileExists("nimble.paths")):
+  include "nimble.paths"
+# end Nimble config
