@@ -53,13 +53,13 @@ suite "Test Sampler - control samples":
 
         cellProof = Poseidon2Proof.init(
           cellIdx.toCellInBlk(blockCells),
-          proofInput.nCellsPerSlot,
+          blockCells,
           sample.merklePaths[0 ..< blockDepth],
         ).tryGet
 
         slotProof = Poseidon2Proof.init(
           cellIdx.toBlkInSlot(blockCells),
-          proofInput.nCellsPerSlot,
+          numSlotBlocks,
           sample.merklePaths[blockDepth ..< blockDepth + slotDepth],
         ).tryGet
 
@@ -154,6 +154,7 @@ suite "Test Sampler":
 
       nBlockCells = builder.numBlockCells
       nSlotCells = builder.numSlotCells
+      nSlotLeaves = nSlotCells div nBlockCells
 
     for i, cellIdx in cellIdxs:
       let
@@ -161,13 +162,13 @@ suite "Test Sampler":
 
         cellProof = Poseidon2Proof.init(
           cellIdx.toCellInBlk(nBlockCells),
-          nSlotCells,
+          nBlockCells,
           sample.merklePaths[0 ..< blockDepth],
         ).tryGet
 
         slotProof = Poseidon2Proof.init(
           cellIdx.toBlkInSlot(nBlockCells),
-          nSlotCells,
+          nSlotLeaves,
           sample.merklePaths[blockDepth ..< sample.merklePaths.len],
         ).tryGet
 

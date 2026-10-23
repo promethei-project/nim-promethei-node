@@ -11,11 +11,16 @@ import pkg/ethers
 import pkg/taskpools
 
 import ../../conf
+import ../../manifest
 import ./backends
+import ./bundle
 import ./prover
 
 logScope:
   topics = "promethei slots proverfactory"
+
+template metaFilePath(config: NodeConf): string =
+  config.circuitDirPath / "proof_main.meta.json"
 
 template graphFilePath(config: NodeConf): string =
   config.circuitDirPath / "proof_main.bin"
@@ -127,7 +132,28 @@ proc initializeCircomCompatBackend(
     config.numProofSamples,
   )
 
+proc validateProofBundle(config: NodeConf): ?!void =
+  let meta = ?ProofBundleMeta.load(config.metaFilePath)
+  if meta.innerK != InnerCodeK.int or meta.innerN != InnerCodeN.int:
+    return failure("Proof bundle inner rate does not match the compiled rate")
+  if meta.maxSlotDepth != config.maxSlotDepth:
+    return failure("Proof bundle slot depth does not match the node configuration")
+  if meta.maxDatasetDepth != config.maxDatasetDepth:
+    return failure("Proof bundle dataset depth does not match the node configuration")
+  if meta.maxBlockDepth != config.maxBlockDepth:
+    return failure("Proof bundle block depth does not match the node configuration")
+  if meta.maxCellElms != config.maxCellElms:
+    return failure("Proof bundle cell size does not match the node configuration")
+  if meta.numSamples != config.numProofSamples:
+    return failure("Proof bundle sample count does not match the node configuration")
+  if meta.allowedCounts != ?meta.expectedAllowedCounts():
+    return failure("Proof bundle allowed-count table does not match its rate")
+  success()
+
 proc initializeProver*(config: NodeConf, tp: Taskpool): ?!Prover =
+  let validation = validateProofBundle(config)
+  if err =? validation.errorOption:
+    return failure(err)
   let prover =
     case config.proverBackend
     of ProverBackendCmd.nimgroth16:

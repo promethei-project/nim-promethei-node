@@ -51,6 +51,33 @@ proc release*(self: NimGroth16BackendRef) =
 
   discard
 
+proc validateInput[SomeHash](
+    self: NimGroth16BackendRef, input: ProofInputs[SomeHash]
+): ?!void =
+  ## The circuit derives every sampled index from a checked quotient. Reject
+  ## malformed input before witness generation instead of padding or truncating.
+  if input.samples.len != self.numSamples:
+    return failure("Sample count does not match the loaded circuit")
+  if input.quotients.len != self.numSamples:
+    return failure("Quotient count does not match the loaded circuit")
+  if input.slotIndex < 0 or uint64(input.slotIndex) >= input.nSlotsPerDataSet.uint64:
+    return failure("Slot index is outside the dataset")
+  if input.nSlotsPerDataSet == 0 or
+      input.nSlotsPerDataSet.uint64 > (1'u64 shl self.datasetDepth):
+    return failure("Dataset does not fit the loaded circuit")
+  if input.nCellsPerSlot == 0 or input.nCellsPerSlot.uint64 > (1'u64 shl self.slotDepth):
+    return failure("Slot sampling space does not fit the loaded circuit")
+  if input.slotProof.len > self.datasetDepth:
+    return failure("Dataset proof is deeper than the loaded circuit")
+
+  for sample in input.samples:
+    if sample.cellData.len != self.cellElms:
+      return failure("Cell element count does not match the loaded circuit")
+    if sample.merklePaths.len > self.slotDepth:
+      return failure("Merkle path is deeper than the loaded circuit")
+
+  success()
+
 proc normalizeInput[SomeHash](
     self: NimGroth16BackendRef, input: ProofInputs[SomeHash]
 ): Inputs =
@@ -80,6 +107,7 @@ proc normalizeInput[SomeHash](
         mekrlePaths.setLen(self.slotDepth)
         mekrlePaths
     ).concat,
+    "quotients": input.quotients,
   }.toTable
 
 proc generateWitnessValues(graph: Graph, inputs: Inputs): auto {.raises: [].} =
@@ -123,6 +151,7 @@ proc prove*[SomeHash](
   ## Prove a statement using backend.
   ##
 
+  ?self.validateInput(input)
   var inputs = self.normalizeInput(input)
   try:
     let proof =
@@ -165,6 +194,14 @@ proc new*(
     graph = ?loadGraph(graphPath).catch
     r1cs = ?parseR1CS(r1csPath).catch
     zkey = ?parseZKey(zkeyPath).catch
+
+  let expectedPrivateInputs = 3 + datasetDepth + numSamples * (cellElms + slotDepth + 1)
+  if r1cs.cfg.nPubOut != 0 or r1cs.cfg.nPubIn != 3 or
+      r1cs.cfg.nPrivIn != expectedPrivateInputs:
+    return failure("Circuit input shape does not match the prover configuration")
+  if zkey.header.nvars != r1cs.cfg.nWires or
+      zkey.header.npubs != r1cs.cfg.nPubIn + r1cs.cfg.nPubOut:
+    return failure("Proving key does not match the circuit shape")
 
   success NimGroth16BackendRef(
     graph: graph,

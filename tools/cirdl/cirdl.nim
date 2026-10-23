@@ -1,7 +1,9 @@
 import std/os
+import std/strutils
 import std/streams
 import pkg/chronicles
 import pkg/chronos
+import pkg/constantine/hashes
 import pkg/ethers
 import pkg/questionable
 import pkg/questionable/results
@@ -34,9 +36,22 @@ proc retrieveUrl(uri: string): Future[seq[byte]] {.async.} =
   finally:
     await noCancel(httpSession.closeWait())
 
-proc downloadZipfile(url: string, filepath: string): Future[?!void] {.async.} =
+proc verifyArchiveHash(data: seq[byte], expected: string): ?!void =
+  let digest = hashes.sha256.hash(data)
+  var actual = newStringOfCap(digest.len * 2)
+  for value in digest:
+    actual.add toHex(value, 2)
+
+  if cmpIgnoreCase(actual, expected) != 0:
+    return failure("Circuit archive hash does not match the on-chain hash")
+  success()
+
+proc downloadZipfile(
+    url: string, filepath: string, expectedHash: string
+): Future[?!void] {.async.} =
   try:
     let file = await retrieveUrl(url)
+    ?verifyArchiveHash(file, expectedHash)
     var s = newFileStream(filepath, fmWrite)
     for b in file:
       s.write(b)
@@ -44,6 +59,11 @@ proc downloadZipfile(url: string, filepath: string): Future[?!void] {.async.} =
   except Exception as exc:
     return failure(exc.msg)
   success()
+
+const RequiredBundleFiles = [
+  "proof_main.r1cs", "proof_main.wasm", "proof_main.zkey", "proof_main.bin",
+  "proof_main_verification_key.json", "proof_main.meta.json",
+]
 
 proc unzip(zipfile: string, targetPath: string): ?!void =
   try:
@@ -54,6 +74,9 @@ proc unzip(zipfile: string, targetPath: string): ?!void =
 
 proc copyFiles(unpackDir: string, circuitPath: string): ?!void =
   try:
+    for name in RequiredBundleFiles:
+      if not fileExists(unpackDir / name):
+        return failure("Bundle is missing " & name)
     for file in walkDir(unpackDir):
       copyFileToDir(file.path, circuitPath)
   except Exception as exc:
@@ -65,7 +88,7 @@ proc main() {.async.} =
   let args = os.commandLineParams()
   if args.len < 2 or args.len > 3:
     printHelp()
-    return
+    quit(1)
 
   let
     circuitPath = args[0]
@@ -90,26 +113,26 @@ proc main() {.async.} =
   without var marketplaceAddress =? mpAddressOverride:
     without lookup =? await provider.getMarketplaceAddress(), err:
       error "No known marketplace address, nor any specified manually", msg = err.msg
-      return
+      quit(1)
     marketplaceAddress = lookup
 
   info "Marketplace address", address = $marketplaceAddress
 
   without circuitHash =? (await getCircuitHash(provider, marketplaceAddress)), err:
     error "Failed to get circuit hash", msg = err.msg
-    return
+    quit(1)
   debug "Got circuithash", circuitHash
 
   let url = formatUrl(circuitHash)
   info "Download URL", url
-  if dlErr =? (await downloadZipfile(url, zipfile)).errorOption:
+  if dlErr =? (await downloadZipfile(url, zipfile, circuitHash)).errorOption:
     error "Failed to download circuit file", msg = dlErr.msg
-    return
+    quit(1)
   debug "Download completed"
 
   if err =? unzip(zipfile, unpackFolder).errorOption:
     error "Failed to unzip file", msg = err.msg
-    return
+    quit(1)
   debug "Unzip completed"
 
   # Unpack library cannot unpack into existing directory. We also cannot
@@ -118,7 +141,7 @@ proc main() {.async.} =
   # So, we unpack to a temp folder and move the files.
   if err =? copyFiles(unpackFolder, circuitPath).errorOption:
     error "Failed to copy files", msg = err.msg
-    return
+    quit(1)
   debug "Files copied"
 
   removeFile(zipfile)

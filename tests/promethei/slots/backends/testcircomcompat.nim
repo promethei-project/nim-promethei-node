@@ -51,6 +51,12 @@ suite "Test Circom Compat Backend - control inputs":
     let proof = (await circom.prove(proofInputs)).tryGet
     check (await circom.verify(proof, proofInputs)).tryGet == false
 
+  test "Should reject a cell count that does not fit uint32":
+    proofInputs.nCellsPerSlot = 1 shl 32
+
+    let proof = await circom.prove(proofInputs)
+    check proof.isErr
+
 suite "Test Circom Compat Backend":
   let
     ecK = 2

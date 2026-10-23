@@ -93,6 +93,106 @@ suite "Test BackendFactory":
       getR1csFile(config).tryGet == config.circuitDirPath / "proof_main.r1cs"
       getZkeyFile(config).tryGet == config.circuitDirPath / "proof_main.zkey"
 
+  test "Should initialize the nim groth16 backend from the checked-in bundle":
+    let config = NodeConf(
+      persistence: true,
+      nat: NatConfig.noNat,
+      metricsAddress: parseIpAddress("127.0.0.1"),
+      prover: true,
+      proverBackend: ProverBackendCmd.nimgroth16,
+      marketplaceAddress: EthAddress.example.some,
+      numProofSamples: 5,
+      maxSlotDepth: 32,
+      maxDatasetDepth: 8,
+      maxBlockDepth: 8,
+      maxCellElms: 67,
+      circuitDir: OutDir("tests/circuits/fixtures"),
+    )
+    var tp = Taskpool.new()
+    let proverResult = config.initializeProver(tp)
+
+    check proverResult.isOk
+    tp.shutdown()
+
+  test "Should initialize the circom compat backend from the checked-in bundle":
+    let config = NodeConf(
+      persistence: true,
+      nat: NatConfig.noNat,
+      metricsAddress: parseIpAddress("127.0.0.1"),
+      prover: true,
+      proverBackend: ProverBackendCmd.circomcompat,
+      marketplaceAddress: EthAddress.example.some,
+      numProofSamples: 5,
+      maxSlotDepth: 32,
+      maxDatasetDepth: 8,
+      maxBlockDepth: 8,
+      maxCellElms: 67,
+      circuitDir: OutDir("tests/circuits/fixtures"),
+    )
+    var tp = Taskpool.new()
+    let proverResult = config.initializeProver(tp)
+
+    check proverResult.isOk
+    tp.shutdown()
+
+  test "Should reject bundle metadata with an inconsistent allowed-count table":
+    writeFile(
+      circuitDir / "proof_main.meta.json",
+      """{
+        "innerK": 1,
+        "innerN": 2,
+        "maxSlotDepth": 32,
+        "maxDatasetDepth": 8,
+        "maxBlockDepth": 8,
+        "maxCellElms": 67,
+        "numSamples": 5,
+        "allowedCounts": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 512]
+      }""",
+    )
+    let
+      config = NodeConf(
+        persistence: true,
+        nat: NatConfig.noNat,
+        metricsAddress: parseIpAddress("127.0.0.1"),
+        prover: true,
+        proverBackend: ProverBackendCmd.nimgroth16,
+        marketplaceAddress: EthAddress.example.some,
+        circuitDir: OutDir(circuitDir),
+      )
+      proverResult = config.initializeProver(Taskpool.new())
+
+    check:
+      proverResult.isErr
+
+  test "Should reject bundle metadata with a mismatched inner rate":
+    writeFile(
+      circuitDir / "proof_main.meta.json",
+      """{
+        "innerK": 4,
+        "innerN": 5,
+        "maxSlotDepth": 32,
+        "maxDatasetDepth": 8,
+        "maxBlockDepth": 8,
+        "maxCellElms": 67,
+        "numSamples": 5,
+        "allowedCounts": []
+      }""",
+    )
+    let
+      config = NodeConf(
+        persistence: true,
+        nat: NatConfig.noNat,
+        metricsAddress: parseIpAddress("127.0.0.1"),
+        prover: true,
+        proverBackend: ProverBackendCmd.nimgroth16,
+        marketplaceAddress: EthAddress.example.some,
+        circuitDir: OutDir(circuitDir),
+      )
+      proverResult = config.initializeProver(Taskpool.new())
+
+    check:
+      proverResult.isErr
+
   test "Should suggest usage of downloader tool when files not available":
     let
       config = NodeConf(

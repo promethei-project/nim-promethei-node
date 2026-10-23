@@ -21,6 +21,8 @@ type
     nslots*: int
     ncells*: int
     index*: int
+    innerK*: int
+    innerN*: int
 
 proc findProjectDir(): string =
   ## find proj dir - assumes this script is in subfolder benchmarks
@@ -182,6 +184,8 @@ when isMainModule:
     nslots: 11, # number of slots in the dataset
     index: 3, # which slot we prove (0..NSLOTS-1)
     ncells: 512, # number of cells in this slot
+    innerK: 1, # inner-code data shards
+    innerN: 2, # inner-code total shards
   )
   let benchenv = createCircuit(args, env)
   echo "\nBench dir:\n", benchenv

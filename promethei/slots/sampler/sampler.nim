@@ -97,7 +97,8 @@ proc getProofInput*[SomeTree, SomeHash](
     datasetRoot = ?verifyTree.root()
     slotTreeCid = self.builder.manifest.slotRoots[self.index]
     slotRoot = self.builder.slotRoots[self.index]
-    cellIdxs = entropy.cellIndices(slotRoot, self.builder.numSlotCells, nSamples)
+    (cellIdxs, quotients) =
+      entropy.cellIndicesAndQuotients(slotRoot, self.builder.numSlotCells, nSamples)
 
   logScope:
     cells = cellIdxs
@@ -116,6 +117,7 @@ proc getProofInput*[SomeTree, SomeHash](
     slotRoot: slotRoot,
     slotIndex: self.index,
     samples: samples,
+    quotients: quotients,
   )
 
 proc new*[SomeTree, SomeHash](

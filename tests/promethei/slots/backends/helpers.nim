@@ -64,6 +64,7 @@ func toJson*(input: ProofInputs[Poseidon2Hash]): JsonNode =
     "slotProof": input.slotProof.mapIt(it.toBig.toJsonDecimal),
     "cellData": input.samples.mapIt(it.cellData.mapIt(it.toBig.toJsonDecimal)),
     "merklePaths": input.samples.mapIt(it.merklePaths.mapIt(it.toBig.toJsonDecimal)),
+    "quotients": input.quotients.mapIt(it.toBig.toJsonDecimal),
   }
 
 func toJson*(input: NormalizedProofInputs[Poseidon2Hash]): JsonNode =
@@ -133,6 +134,20 @@ func jsonToProofInput*(
       hash.fromBig(big)
       hash
 
+    quotients =
+      if inputJson.hasKey("quotients"):
+        inputJson["quotients"].mapIt(
+          block:
+            var
+              big: BigInt[254]
+              hash: Poseidon2Hash
+            doAssert bool(big.fromDecimal(it.getStr))
+            hash.fromBig(big)
+            hash
+        )
+      else:
+        @[]
+
     nCellsPerSlot = inputJson["nCellsPerSlot"].getInt
     nSlotsPerDataSet = inputJson["nSlotsPerDataSet"].getInt
     slotIndex = inputJson["slotIndex"].getInt
@@ -148,4 +163,5 @@ func jsonToProofInput*(
     samples: zip(cellData, merklePaths).mapIt(
         Sample[Poseidon2Hash](cellData: it[0], merklePaths: it[1])
       ),
+    quotients: quotients,
   )

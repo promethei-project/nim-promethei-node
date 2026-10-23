@@ -68,6 +68,7 @@ func normalizeInput*[SomeHash](
       nSlotsPerDataSet: input.nSlotsPerDataSet,
       slotProof: normSlotProof,
       samples: normSamples,
+      quotients: input.quotients,
     )
   )
 
@@ -126,6 +127,9 @@ proc prove[SomeHash](
   ) != ERR_OK:
     return failure("Failed to push data set root")
 
+  if input.nCellsPerSlot.uint64 >= (1'u64 shl 32):
+    return failure("nCellsPerSlot does not fit the CircomCompat uint32 input")
+
   if ctx.push_input_u32("nCellsPerSlot".cstring, input.nCellsPerSlot.uint32) != ERR_OK:
     return failure("Failed to push nCellsPerSlot")
 
@@ -144,6 +148,18 @@ proc prove[SomeHash](
     "slotProof".cstring, slotProof[0].addr, uint (slotProof[0].len * slotProof.len)
   ) != ERR_OK:
     return failure("Failed to push slot proof")
+
+  doAssert input.quotients.len == self.numSamples,
+    "Number of sample quotients does not match the circuit"
+
+  var quotients = input.quotients.mapIt(it.toBytes).concat
+  if quotients.len > 0 and
+      ctx.push_input_u256_array(
+        "quotients".cstring,
+        quotients[0].addr,
+        uint (quotients[0].len * input.quotients.len),
+      ) != ERR_OK:
+    return failure("Failed to push sample quotients")
 
   for s in input.samples:
     var
