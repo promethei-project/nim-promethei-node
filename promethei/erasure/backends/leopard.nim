@@ -32,14 +32,11 @@ method encode*(
   # length; short or over-long shards would read out of bounds.
   for shard in data:
     if shard.len != self.blockSize.int:
-      return Result[void, cstring].err(
-        "Encode shard length does not match block size"
-      )
+      return Result[void, cstring].err("Encode shard length does not match block size")
   for shard in parity:
     if shard.len != self.blockSize.int:
-      return Result[void, cstring].err(
-        "Parity work buffer length does not match block size"
-      )
+      return
+        Result[void, cstring].err("Parity work buffer length does not match block size")
 
   var encoder =
     if self.encoder.isNone:
@@ -62,14 +59,10 @@ method decode*(
   # blockSize or it would read out of bounds; empty is the erasure marker.
   for shard in data:
     if shard.len > 0 and shard.len != self.blockSize.int:
-      return Result[void, cstring].err(
-        "Decode shard length does not match block size"
-      )
+      return Result[void, cstring].err("Decode shard length does not match block size")
   for shard in parity:
     if shard.len > 0 and shard.len != self.blockSize.int:
-      return Result[void, cstring].err(
-        "Parity shard length does not match block size"
-      )
+      return Result[void, cstring].err("Parity shard length does not match block size")
 
   var decoder =
     if self.decoder.isNone:
