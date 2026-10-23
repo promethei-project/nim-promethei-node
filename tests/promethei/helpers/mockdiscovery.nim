@@ -2,9 +2,12 @@ import pkg/chronos
 import pkg/libp2p
 import pkg/questionable
 import pkg/promethei/discovery
+import pkg/promethei/blockexchange/engine
 import pkg/contractabi/address as ca
 
 type MockDiscovery* = ref object of Discovery
+  nodesDiscoveredHandler*: proc(d: MockDiscovery): int {.gcsafe, raises: [].}
+
   findBlockProvidersHandler*: proc(
     d: MockDiscovery, cid: Cid
   ): Future[seq[SignedPeerRecord]] {.async: (raises: [CancelledError]).}
@@ -22,6 +25,13 @@ type MockDiscovery* = ref object of Discovery
 
 proc new*(T: type MockDiscovery): MockDiscovery =
   MockDiscovery()
+
+method nodesDiscovered*(d: MockDiscovery): int =
+  # Report a healthy table unless a test overrides it
+  if isNil(d.nodesDiscoveredHandler):
+    return DefaultMinAdvertisePeers
+
+  d.nodesDiscoveredHandler(d)
 
 proc findPeer*(
     d: Discovery, peerId: PeerId
