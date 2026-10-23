@@ -71,12 +71,8 @@ proc initializeNetworkStore(temporary: TemporaryNode) =
 
 proc initializeNode(temporary: TemporaryNode) =
   temporary.node = PrometheiNodeRef.new(
-    temporary.p2p,
-    temporary.networkStore,
-    temporary.localStore,
-    temporary.exchangeEngine,
-    temporary.discoveryNetwork,
-    Taskpool.new(),
+    temporary.p2p, temporary.networkStore, temporary.localStore,
+    temporary.exchangeEngine, temporary.discoveryNetwork, temporary.tp,
   )
 
 proc create*(
@@ -95,6 +91,7 @@ proc create*(
 
 proc destroy*(temporary: TemporaryNode) {.async.} =
   await temporary.node.stop()
+  await temporary.p2p.stop()
   (await temporary.repoDs.close()).tryGet()
   (await temporary.metaDs.close()).tryGet()
   (await temporary.discoveryDs.close()).tryGet()

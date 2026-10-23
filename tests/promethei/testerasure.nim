@@ -1,5 +1,6 @@
 import std/sequtils
 import std/sugar
+import std/tables
 
 import pkg/chronos
 import pkg/questionable/results
@@ -7,6 +8,7 @@ import pkg/questionable/results
 import pkg/promethei/erasure
 import pkg/promethei/manifest
 import pkg/promethei/stores
+import pkg/promethei/stores/repostore/types
 import pkg/promethei/blocktype as bt
 import pkg/promethei/rng as promethei_rng
 import pkg/promethei/utils
@@ -14,6 +16,7 @@ import pkg/promethei/indexingstrategy
 import pkg/taskpools
 import pkg/threadspawn
 import pkg/kvstore
+import pkg/stew/bitseqs
 
 import ../asynctest
 import ./helpers
@@ -29,12 +32,13 @@ suite "Erasure encode/decode":
   var store: RepoStore
   var erasure: Erasure
   var tp: Taskpool
+  var repoDs: KVStore
+  var metaDs: KVStore
 
   setup:
     tp = Taskpool.new(num_threads = 4)
-    let
-      repoDs = SQLiteKVStore.new(SqliteMemory, tp).tryGet()
-      metaDs = SQLiteKVStore.new(SqliteMemory, tp).tryGet()
+    repoDs = SQLiteKVStore.new(SqliteMemory, tp).tryGet()
+    metaDs = SQLiteKVStore.new(SqliteMemory, tp).tryGet()
     rng = promethei_rng.Rng.instance()
     chunker = RandomChunker.new(rng, size = dataSetSize, chunkSize = BlockSize)
     store = RepoStore.new(repoDs, metaDs)
@@ -56,6 +60,57 @@ suite "Erasure encode/decode":
 
     return encoded
 
+  proc loseBlock(treeCid: Cid, index: int) {.async.} =
+    ## Simulate block loss the way the store's own cleanup does: mark the leaf
+    ## deleted and drop the block data. Going through the deletion API would
+    ## put the dataset into its Deleting state, which by design rejects the
+    ## writes decode needs to restore the lost data into the same dataset.
+    let
+      idx = index.Natural
+      leafKey = blockLeafKey(treeCid, idx).tryGet()
+
+    let leafRes = await metaDs.get(leafKey, LeafMetadata)
+    if err =? leafRes.errorOption:
+      # Only a missing record means "no leaf at that position": the original
+      # tree legitimately holds none for parity indices. Any other read
+      # failure must fail the test rather than read as absent.
+      doAssert err of KVStoreKeyNotFound, "leaf metadata read failed: " & err.msg
+      return
+
+    let
+      leaf = leafRes.get()
+      blkKey = makePrefixKey(store.postFixLen, leaf.val.blkCid).tryGet()
+
+    # Drop the block data with the record's own CAS token: a bare key carries
+    # token 0, which matches nothing and would leave the data readable.
+    let blkRecs = (await repoDs.get(@[blkKey])).tryGet()
+    check (await repoDs.delete(blkRecs)).tryGet().len == 0
+
+    # Mirror the rest of the store's cleanup: the leaf is marked deleted and
+    # the overlay bit for the index is cleared, leaving the overlay status
+    # untouched so the dataset stays writable for recovery.
+    var marked = leaf
+    marked.val.deleted = true
+    (await metaDs.tryPut(marked, maxRetries = 3)).tryGet()
+
+    let
+      ovKey = overlayKey(treeCid).tryGet()
+      ovRec = (await metaDs.get(ovKey, OverlayMetadata)).tryGet()
+
+    var
+      ov = ovRec
+      bits = BitSeq.init(idx.int + 1)
+
+    bits.combineSafe(ov.val.blocks)
+    bits.clearBit(idx)
+    ov.val.blocks = bits
+
+    (await metaDs.tryPut(ov, maxRetries = 3)).tryGet()
+
+    # The write above went straight to the datastore, so drop the store's
+    # cached overlay: the next bitmap read must see the cleared bit.
+    store.overlayCache.del(ovKey)
+
   test "Should tolerate losing M data blocks in a single random column":
     const
       buffers = 20
@@ -69,8 +124,8 @@ suite "Erasure encode/decode":
 
     for _ in 0 ..< encoded.ecM:
       dropped.add(column)
-      (await store.delBlock(encoded.treeCid, column)).tryGet()
-      (await store.delBlock(manifest.treeCid, column)).tryGet()
+      await loseBlock(encoded.treeCid, column)
+      await loseBlock(manifest.treeCid, column)
       column = (column + encoded.steps) mod encoded.blocksCount # wrap around
 
     var decoded = (await erasure.decode(encoded)).tryGet()
@@ -98,8 +153,11 @@ suite "Erasure encode/decode":
 
     for _ in 0 ..< encoded.ecM + 1:
       dropped.add(column)
-      (await store.delBlock(encoded.treeCid, column)).tryGet()
-      (await store.delBlock(manifest.treeCid, column)).tryGet()
+      # Prime the store's bitmap cache before the loss: the post-loss checks
+      # must observe the cleared bits, not a cached pre-loss snapshot.
+      check (await store.hasBlock(manifest.treeCid, column.Natural)).tryGet()
+      await loseBlock(encoded.treeCid, column)
+      await loseBlock(manifest.treeCid, column)
       column = (column + encoded.steps) mod encoded.blocksCount # wrap around
 
     var decoded: Manifest
@@ -130,8 +188,8 @@ suite "Erasure encode/decode":
       offset.inc
 
     for idx in blocks:
-      (await store.delBlock(encoded.treeCid, idx)).tryGet()
-      (await store.delBlock(manifest.treeCid, idx)).tryGet()
+      await loseBlock(encoded.treeCid, idx)
+      await loseBlock(manifest.treeCid, idx)
       discard
 
     discard (await erasure.decode(encoded)).tryGet()
@@ -166,8 +224,8 @@ suite "Erasure encode/decode":
       offset.inc
 
     for idx in blocks:
-      (await store.delBlock(encoded.treeCid, idx)).tryGet()
-      (await store.delBlock(manifest.treeCid, idx)).tryGet()
+      await loseBlock(encoded.treeCid, idx)
+      await loseBlock(manifest.treeCid, idx)
       discard
 
     var decoded: Manifest
@@ -184,8 +242,8 @@ suite "Erasure encode/decode":
 
     # loose M original (systematic) symbols/blocks
     for b in 0 ..< (encoded.steps * encoded.ecM):
-      (await store.delBlock(encoded.treeCid, b)).tryGet()
-      (await store.delBlock(manifest.treeCid, b)).tryGet()
+      await loseBlock(encoded.treeCid, b)
+      await loseBlock(manifest.treeCid, b)
 
     discard (await erasure.decode(encoded)).tryGet()
 
@@ -204,8 +262,8 @@ suite "Erasure encode/decode":
 
     # loose M parity (all!) symbols/blocks from the dataset
     for b in blocks[^(encoded.steps * encoded.ecM) ..^ 1]:
-      (await store.delBlock(encoded.treeCid, b)).tryGet()
-      (await store.delBlock(manifest.treeCid, b)).tryGet()
+      await loseBlock(encoded.treeCid, b)
+      await loseBlock(manifest.treeCid, b)
 
     discard (await erasure.decode(encoded)).tryGet()
 
