@@ -3,6 +3,7 @@
 import std/options
 import std/sequtils
 import std/sugar
+import std/tables
 import times
 
 import pkg/iter
@@ -872,6 +873,58 @@ proc requestStorage*(
 
   success purchase.id
 
+proc reseedProtectedRange(
+    self: PrometheiNodeRef,
+    sourceRoot: Cid,
+    targetRoot: Cid,
+    firstIndex, lastIndex: int,
+    blockSize: int,
+): Future[?!void] {.async: (raises: [CancelledError]).} =
+  ## Re-seed protected leaves `[firstIndex, lastIndex)` from `sourceRoot`
+  ## into `targetRoot` using bounded read and write batches. Every required
+  ## source block must be present in its batch response.
+  let batchCap = max(1, DefaultPayloadIOTarget div blockSize)
+
+  var index = firstIndex
+  while index < lastIndex:
+    let
+      count = min(batchCap, lastIndex - index)
+      indices = collect(newSeq):
+        for offset in 0 ..< count:
+          (index + offset).Natural
+
+    var
+      blocks = initTable[Natural, bt.Block]()
+      response = ?await self.networkStore.getBlocks(sourceRoot, indices)
+    for item in response.mitems:
+      blocks[item[0]] = item[1]
+
+    var items: seq[(bt.Block, Natural, ?PrometheiProof)]
+    for idx in indices:
+      let blk = blocks.getOrDefault(idx)
+      if blk.isNil:
+        return failure(
+          newException(
+            BlockNotFoundError,
+            "Missing protected block during repair reseed, treeCid: " & $sourceRoot &
+              ", index: " & $idx,
+          )
+        )
+      if not blk.isEmpty and blk.data.len != blockSize:
+        return failure(
+          newException(
+            PrometheiError,
+            "Protected block length mismatch during repair reseed, treeCid: " &
+              $sourceRoot & ", index: " & $idx,
+          )
+        )
+      items.add((blk, idx, PrometheiProof.none))
+
+    ?await self.networkStore.putBlocks(targetRoot, items)
+    index += count
+
+  success()
+
 proc validateVerifiableManifest(manifest: Manifest, slotSize: uint64): ?!void =
   if not manifest.verifiable:
     return failure("Received manifest type is not verifiable")
@@ -968,15 +1021,14 @@ proc storeSlot*(
         # tree - so recovery never depends on other slots' holders. Only
         # the inner parity is not reconstructible here; it is regenerated
         # below (it is deterministic from the slot's data).
-        var items: seq[(bt.Block, Natural, ?PrometheiProof)]
-        for idx in 0 ..< manifest.protectedBlocksCount:
-          let blk =
-            if idx < manifest.originalBlocksCount:
-              ?await self.networkStore.getBlock(manifest.originalTreeCid, idx.Natural)
-            else:
-              ?await self.networkStore.getBlock(manifest.protectedTreeCid, idx.Natural)
-          items.add((blk, idx.Natural, PrometheiProof.none))
-        ?await self.networkStore.putBlocks(manifest.treeCid, items)
+        ?await self.reseedProtectedRange(
+          manifest.originalTreeCid, manifest.treeCid, 0, manifest.originalBlocksCount,
+          manifest.blockSize.int,
+        )
+        ?await self.reseedProtectedRange(
+          manifest.protectedTreeCid, manifest.treeCid, manifest.originalBlocksCount,
+          manifest.protectedBlocksCount, manifest.blockSize.int,
+        )
         success(),
     )
 
