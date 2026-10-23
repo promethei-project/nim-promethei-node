@@ -412,6 +412,7 @@ proc encode*(
     blocks: Natural,
     parity: Natural,
     strategy = SteppedStrategy,
+    expiry = ZeroSeconds,
 ): Future[?!Manifest] {.async: (raises: [CancelledError]).} =
   ## Encode a manifest into one that is erasure protected.
   ##
@@ -465,6 +466,7 @@ proc encode*(
       ?await self.repoStore.withOverlay(
         manifest.treeCid,
         status = Repairing.some,
+        expiry = expiry,
         body = proc(): Future[?!Cid] {.
             closure, gcsafe, async: (raises: [CancelledError])
         .} =
@@ -649,7 +651,7 @@ proc decode*(
   return decoded.success
 
 proc repair*(
-    self: Erasure, encoded: Manifest
+    self: Erasure, encoded: Manifest, expiry = ZeroSeconds
 ): Future[?!void] {.async: (raises: [CancelledError]).} =
   ## Repair a protected manifest by reconstructing the full dataset
   ##
@@ -681,6 +683,7 @@ proc repair*(
   ?await self.repoStore.withOverlay(
     encoded.originalTreeCid,
     status = Repairing.some,
+    expiry = expiry,
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, _) =
@@ -705,7 +708,11 @@ proc repair*(
   # blocks for a valid slot - this is higly inneficient
   # we need to either fix leopard or use another implementation
   let repaired =
-    ?(await self.encode(encoded, encoded.ecK, encoded.ecM, encoded.protectedStrategy))
+    ?(
+      await self.encode(
+        encoded, encoded.ecK, encoded.ecM, encoded.protectedStrategy, expiry
+      )
+    )
 
   trace "Successfully re-encoded original dataset"
   if repaired.treeCid != encoded.treeCid:
