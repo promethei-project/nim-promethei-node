@@ -46,7 +46,7 @@ suite "Uploads and downloads":
     %*{
       "treeCid": "zDzSvJTfBxWb7YJRbrX9LMbkm4FkhvBx5pRb6mc9ZntsGcHbZeiq",
       "datasetSize": 18,
-      "blockSize": 524288,
+      "blockSize": 131072,
       "protected": false,
       "filename": nil,
       "mimetype": nil,

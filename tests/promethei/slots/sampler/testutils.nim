@@ -89,7 +89,7 @@ suite "Test proof sampler utils":
     check:
       slotCellIndices(3) == getExpectedIndices(3)
 
-  for (input, expected) in [(10, 0), (255, 0), (256, 1), (511, 1), (512, 2)]:
+  for (input, expected) in [(10, 0), (63, 0), (64, 1), (127, 1), (128, 2)]:
     test "Can get slotBlockIndex from slotCellIndex (" & $input & " -> " & $expected &
       ")":
       let slotBlockIndex = toBlkInSlot(input, numCells = cellsPerBlock)
@@ -97,7 +97,7 @@ suite "Test proof sampler utils":
       check:
         slotBlockIndex == expected
 
-  for (input, expected) in [(10, 10), (255, 255), (256, 0), (511, 255), (512, 0)]:
+  for (input, expected) in [(10, 10), (63, 63), (64, 0), (127, 63), (128, 0)]:
     test "Can get blockCellIndex from slotCellIndex (" & $input & " -> " & $expected &
       ")":
       let blockCellIndex = toCellInBlk(input, numCells = cellsPerBlock)
