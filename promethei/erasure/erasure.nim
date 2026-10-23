@@ -519,10 +519,7 @@ proc leopardDecodeTask*(
     ctx[].result = ThreadSpawnRes[seq[seq[byte]]].ok(move recovered)
 
 proc decodeInternal(
-    self: Erasure,
-    encodedTreeCid: Cid,
-    targetCid: Cid,
-    params: EncodingParams,
+    self: Erasure, encodedTreeCid: Cid, targetCid: Cid, params: EncodingParams
 ): Future[?!(ref seq[Cid], seq[Natural])] {.async: (raises: [CancelledError]).} =
   logScope:
     encodedTreeCid = encodedTreeCid
@@ -690,9 +687,7 @@ proc repair*(
     body = proc(): Future[?!void] {.closure, async: (raises: [CancelledError]).} =
       let
         (cids, _) =
-          ?await self.decodeInternal(
-            encoded.treeCid, encoded.originalTreeCid, params
-          )
+          ?await self.decodeInternal(encoded.treeCid, encoded.originalTreeCid, params)
         tree =
           # sync build: root comparison only (decode paths do not stream)
           ?PrometheiTree.init(cids[0 ..< encoded.originalBlocksCount])
