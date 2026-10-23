@@ -529,7 +529,7 @@ proc testLifecycle*(
       check meta.status == Completed
       check meta.expiry == customExpiry
 
-    test "Should keep initial status when body is cancelled":
+    test "Should mark overlay failed when body is cancelled":
       let treeCid = Cid.example
       var bodyStarted = newFuture[void]("withOverlay.cancel.started")
 
@@ -550,7 +550,7 @@ proc testLifecycle*(
         discard await op
 
       let meta = (await repo.getOverlay(treeCid)).tryGet()
-      check meta.status == Repairing
+      check meta.status == Failure
 
     test "Should retain written leaf metadata when body is cancelled":
       let
@@ -580,7 +580,7 @@ proc testLifecycle*(
       let
         meta = (await repo.getOverlay(treeCid)).tryGet()
         leaf = (await repo.getLeafMetadata(treeCid, 0.Natural)).tryGet()
-      check meta.status == Storing
+      check meta.status == Failure
       check leaf.blkCid == blk.cid
 
     test "Should create tmp overlay before running body":

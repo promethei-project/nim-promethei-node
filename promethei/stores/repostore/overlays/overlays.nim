@@ -88,9 +88,8 @@ proc putOverlay*(
   # Deleting and Finalizing overlays reject ordinary writes, including
   # expiry-only updates: a finalization in flight must not be overwritten.
   if overlayRejectsWrites(record.val.status):
-    return failure(
-      newException(OverlayDeletingError, "Overlay is finalizing or deleting")
-    )
+    return
+      failure(newException(OverlayDeletingError, "Overlay is finalizing or deleting"))
 
   self.mergeOverlay(record.val, status, blocks, expiry, manifestCid)
   var cachedOverlay = record.val
@@ -418,8 +417,7 @@ proc finalizeOverlay*(
     self.treeShapeCache.del(realTreeCid)
 
   # Read original status, mark Finalizing (rejects new writers), drain in-flight writers.
-  without tmpRecord =?
-      (await noCancel(self.metaDs.get(tmpOverlayKey, OverlayMetadata))),
+  without tmpRecord =? (await noCancel(self.metaDs.get(tmpOverlayKey, OverlayMetadata))),
     err:
     return failure(err)
   let tmpOrigStatus = tmpRecord.val.status
@@ -487,8 +485,7 @@ proc finalizeOverlay*(
         exc = restoreErr.msg, original = err.msg
       return failure(restoreErr)
 
-    error "Finalization failed and the temporary namespace was restored",
-      exc = err.msg
+    error "Finalization failed and the temporary namespace was restored", exc = err.msg
     return failure(err)
 
   trace "Temp overlay finalized successfully"
@@ -509,22 +506,35 @@ proc withOverlay*[T](
     status = status
 
   trace "Starting overlay operation"
-  if err =? (await self.putOverlay(treeCid, status, BitSeq.init(0), expiry)).errorOption:
-    error "Unable to create/update overlay metadata", exc = err.msg
-    return failure(err)
+  try:
+    if err =?
+        (await self.putOverlay(treeCid, status, BitSeq.init(0), expiry)).errorOption:
+      error "Unable to create/update overlay metadata", exc = err.msg
+      return failure(err)
 
-  let
-    bodyRes = await body()
-    finalState = if bodyRes.isOk: Completed.some else: Failure.some
+    let
+      bodyRes = await body()
+      finalState = if err =? bodyRes.errorOption: Failure.some else: Completed.some
 
-  if err =?
-      (await self.putOverlay(treeCid, finalState, BitSeq.init(0), expiry)).errorOption:
-    error "Unable to set overlay final state", exc = err.msg
-    return failure(err)
+    # Once the terminal status write starts, let it finish even if the caller
+    # cancels; the operation then completes normally rather than reporting a
+    # cancellation that would leave an ambiguous status behind.
+    if err =? (
+      await noCancel self.putOverlay(treeCid, finalState, BitSeq.init(0), expiry)
+    ).errorOption:
+      error "Unable to set overlay final state", exc = err.msg
+      return failure(err)
 
-  trace "Overlay operation completed", finalState
+    trace "Overlay operation completed", finalState
 
-  return bodyRes
+    return bodyRes
+  except CancelledError as exc:
+    if err =? (
+      await noCancel self.putOverlay(treeCid, Failure.some, BitSeq.init(0), expiry)
+    ).errorOption:
+      let msg = err.msg
+      error "Unable to mark overlay failed after cancellation", exc = msg
+    raise exc
 
 proc withTmpOverlay*(
     self: RepoStore,
