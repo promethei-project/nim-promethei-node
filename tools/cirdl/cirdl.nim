@@ -10,11 +10,16 @@ import pkg/chronos/apps/http/httpclient
 import ../../promethei/marketplace/contracts/marketplacecontract
 import ../../promethei/marketplace/contracts/deployment
 
+const DefaultCircuitStorageUrl =
+  "https://github.com/promethei-project/nim-promethei-storage-proofs-circuits/releases/download/circuits"
+
 proc printHelp() =
   info "Usage: ./cirdl [circuitPath] [rpcEndpoint] ([marketplaceAddress])"
   info "  circuitPath: path where circuit files will be placed."
   info "  rpcEndpoint: URL of web3 RPC endpoint."
   info "  marketplaceAddress: Address of deployed marketplace contracts. If left out, will auto-discover based on connected network."
+  info "  PROMETHEI_CIRCUIT_STORAGE_URL: overrides the archive storage root, defaults to " &
+    DefaultCircuitStorageUrl
 
 proc getCircuitHash(
     provider: JsonRpcProvider, marketplaceAddress: Address
@@ -24,7 +29,13 @@ proc getCircuitHash(
   return success config.proofs.zkeyHash
 
 proc formatUrl(hash: string): string =
-  "https://circuit.archivist.storage/proving-key/" & hash
+  ## Archives are published as release assets named after their hash, so the
+  ## on-chain hash addresses the asset directly. The root is overridable for
+  ## mirrors and for deployments that serve their own copy.
+  var root = getEnv("PROMETHEI_CIRCUIT_STORAGE_URL", DefaultCircuitStorageUrl)
+  while root.len > 0 and root[^1] == '/':
+    root.setLen(root.len - 1)
+  root & "/" & hash
 
 proc retrieveUrl(uri: string): Future[seq[byte]] {.async.} =
   let httpSession = HttpSessionRef.new()
