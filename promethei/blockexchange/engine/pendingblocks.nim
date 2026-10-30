@@ -6,6 +6,7 @@ import std/hashes
 import std/sequtils
 import std/sets
 import std/strformat
+import std/enumutils
 
 import pkg/chronos
 import pkg/libp2p
@@ -82,6 +83,7 @@ type
     owners: HashSet[BlockHandle]
     requestedPeer: BlockExcPeerCtx # nil = unassigned
     startTime: int64
+    stateEnteredAt: int64
     priority: int
     retries: int
     attempts: int
@@ -117,6 +119,16 @@ type
 
 func hash(handle: BlockHandle): Hash =
   cast[pointer](handle).hash
+
+proc recordRetryOutcome*(self: PendingBlocksManager, addresses: seq[BlockAddress]) =
+  ## Record outcome duration for retried blocks
+  let now = getMonoTime().ticks
+  for address in addresses:
+    if req =? self.blocks .? [address]:
+      let durationUs = (now - req.startTime) div 1000
+      promethei_block_exchange_request_outcome_duration_seconds.observe(
+        durationUs.float64 / 1_000_000, labelValues = ["retried"]
+      )
 
 proc recordRetryOutcome*(self: PendingBlocksManager, addresses: seq[BlockAddress]) =
   ## Record outcome duration for retried blocks
@@ -260,6 +272,14 @@ proc releaseWantHandle(
   req.owners.excl(wrapped)
   if req.owners.len == 0 and not req.handle.finished:
     warn "Abandoning block", address
+    promethei_block_exchange_requests_abandoned.inc()
+    let now = getMonoTime().ticks
+    let durationUs = (now - req.startTime) div 1000
+    promethei_block_exchange_request_outcome_duration_seconds.observe(
+      durationUs.float64 / 1_000_000, labelValues = ["abandoned"]
+    )
+    promethei_block_exchange_handles_failed.inc()
+
     req.handle.fail(
       newException(RequestAbandonedEngineError, fmt"Abandoning block {address}")
     )
@@ -321,6 +341,7 @@ proc getWantHandle*(
       handle: handle,
       retries: self.retries,
       startTime: getMonoTime().ticks,
+      stateEnteredAt: getMonoTime().ticks,
       priority: priority,
       addedAt: now,
       dispatched: newAsyncEvent(),
@@ -418,6 +439,13 @@ proc failWantHandle*(
     if not blockReq.handle.finished:
       let err = (ref errType)(address: address, msg: msg)
       blockReq.handle.fail(err)
+      promethei_block_exchange_handles_failed.inc()
+      promethei_block_exchange_requests_failed.inc()
+      let now = getMonoTime().ticks
+      let durationUs = (now - blockReq.startTime) div 1000
+      promethei_block_exchange_request_outcome_duration_seconds.observe(
+        durationUs.float64 / 1_000_000, labelValues = ["failed"]
+      )
       self.failOwners(address, err)
       self.recordLifecycle(HandleFailed)
 
@@ -473,6 +501,46 @@ proc shouldSkipBatch(self: PendingBlocksManager, item: BlockReq): bool =
   if self.retriesExhausted(item.address):
     trace "Retries exhausted, skipping block", address = item.address
     return true
+
+proc validateBlock(
+    self: PendingBlocksManager, address: BlockAddress, state: BlockReqState
+): Future[bool] {.async: (raises: [CancelledError]).} =
+  without req =? self.blocks .? [address]:
+    trace "Address is not pending", address
+    return false
+
+  if req.state != state or not req.requestedPeer.isNil:
+    trace "Address already in pipeline, skipping", address, state = req.state
+    return false
+
+  if self.retriesExhausted(address):
+    trace "Retries exhausted, skipping block", address
+    await self.failWantHandle(
+      address, RetriesExhaustedEngineError, "Block request retries exhausted"
+    )
+    return false
+
+  return true
+
+proc validateBlock(
+    self: PendingBlocksManager, address: BlockAddress, state: BlockReqState
+): Future[bool] {.async: (raises: [CancelledError]).} =
+  without req =? self.blocks .? [address]:
+    trace "Address is not pending", address
+    return false
+
+  if req.state != state or not req.requestedPeer.isNil:
+    trace "Address already in pipeline, skipping", address, state = req.state
+    return false
+
+  if self.retriesExhausted(address):
+    trace "Retries exhausted, skipping block", address
+    await self.failWantHandle(
+      address, RetriesExhaustedEngineError, "Block request retries exhausted"
+    )
+    return false
+
+  return true
 
 proc peerBatchWorker(
     self: PendingBlocksManager, batchReq: BatchReq
