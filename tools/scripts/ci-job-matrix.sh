@@ -30,7 +30,7 @@ linux () {
 
 # sets parameters for a macos job
 macos () {
-  job_builder="macos-14"
+  job_builder="macos-15"
 }
 
 # sets parameters for a windows job
