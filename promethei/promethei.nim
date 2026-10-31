@@ -108,8 +108,13 @@ proc stop*(s: NodeServer) {.async.} =
   notice "Stopping node"
 
   await s.restServer.stop()
-  await s.prometheiNode.stop()
+
+  # Stop the maintainer before the store closes: its timer keeps writing to the
+  # store, and the store's close waits for outstanding work, so a callback that
+  # races the close keeps the node from ever exiting.
   await s.maintenance.stop()
+
+  await s.prometheiNode.stop()
   await s.natTraversal.stop()
   await s.repoStore.stop()
   await s.prometheiNode.switch.stop()
