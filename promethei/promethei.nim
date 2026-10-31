@@ -109,9 +109,8 @@ proc stop*(s: NodeServer) {.async.} =
 
   await s.restServer.stop()
 
-  # Stop the maintainer before the store closes: its timer keeps writing to the
-  # store, and the store's close waits for outstanding work, so a callback that
-  # races the close keeps the node from ever exiting.
+  # Stop the maintainer before its store closes, so no maintenance scan or
+  # overlay deletion can overlap store shutdown.
   await s.maintenance.stop()
 
   await s.prometheiNode.stop()

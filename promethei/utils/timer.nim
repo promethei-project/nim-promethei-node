@@ -49,7 +49,12 @@ method start*(
 
 method stop*(timer: Timer) {.base, async: (raises: []).} =
   timer.stopRequested = true
-  if timer.loopFuture != nil and not timer.loopFuture.finished:
-    trace "Timer stopping: ", name = timer.name
-    await timer.loopFuture.cancelAndWait()
-  timer.loopFuture = nil
+  let loop = timer.loopFuture
+  if loop != nil:
+    if not loop.finished:
+      trace "Timer stopping: ", name = timer.name
+      await loop.cancelAndWait()
+    # Clear only the loop that was stopped: an overlapping stop must not clear
+    # a loop that was started in the meantime.
+    if timer.loopFuture == loop:
+      timer.loopFuture = nil
