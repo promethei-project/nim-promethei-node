@@ -65,3 +65,21 @@ asyncchecksuite "Timer":
     startNumbersTimer()
     startLettersTimer()
     check eventually(output == "0a1b2c3d4e", pollInterval = 10)
+
+  test "Stop completes when the callback swallows cancellation":
+    # BlockMaintainer's callback catches CancelledError and returns normally,
+    # so a stop that arrives while the callback is running must still complete.
+    var timer = Timer.new("testtimer-stop-during-callback")
+    let running = newFuture[void]()
+
+    proc callback(): Future[void] {.async: (raises: []).} =
+      if not running.finished:
+        running.complete()
+      try:
+        await sleepAsync(10.seconds)
+      except CancelledError:
+        discard
+
+    timer.start(callback, 10.milliseconds)
+    await running
+    check await timer.stop().withTimeout(2.seconds)

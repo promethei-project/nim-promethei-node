@@ -14,6 +14,7 @@ type
     interval: Duration
     name: string
     loopFuture: Future[void]
+    stopRequested: bool
 
 proc new*(T: type Timer, timerName: string): Timer =
   ## Create a new Timer intance with the given name
@@ -21,8 +22,13 @@ proc new*(T: type Timer, timerName: string): Timer =
 
 proc timerLoop(timer: Timer) {.async: (raises: []).} =
   try:
-    while true:
+    while not timer.stopRequested:
       await timer.callback()
+      # The callback may swallow the cancellation it receives (callbacks are
+      # declared raising no exceptions), so check whether a stop was requested
+      # while it ran, otherwise the loop would resume and never complete.
+      if timer.stopRequested:
+        break
       await sleepAsync(timer.interval)
   except CancelledError:
     discard # do not propagate as timerLoop is asyncSpawned
@@ -38,10 +44,12 @@ method start*(
   trace "Timer starting: ", name = timer.name
   timer.callback = callback
   timer.interval = interval
+  timer.stopRequested = false
   timer.loopFuture = timerLoop(timer)
 
 method stop*(timer: Timer) {.base, async: (raises: []).} =
+  timer.stopRequested = true
   if timer.loopFuture != nil and not timer.loopFuture.finished:
     trace "Timer stopping: ", name = timer.name
     await timer.loopFuture.cancelAndWait()
-    timer.loopFuture = nil
+  timer.loopFuture = nil
