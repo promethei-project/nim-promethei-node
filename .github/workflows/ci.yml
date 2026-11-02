@@ -10,7 +10,7 @@ on:
       - '.github/**'
       - '!.github/workflows/ci.yml'
       - '!.github/workflows/ci-reusable.yml'
-      - '!.github/workflows/actions/ci-setup/action.yml'
+      - '!.github/actions/ci-setup/action.yml'
       - 'docker/**'
   pull_request:
     paths-ignore: *paths-ignore

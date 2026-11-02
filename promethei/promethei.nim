@@ -120,8 +120,12 @@ proc stop*(s: NodeServer) {.async.} =
   notice "Stopping node"
 
   await s.restServer.stop()
-  await s.prometheiNode.stop()
+
+  # Stop the maintainer before its store closes, so no maintenance scan or
+  # overlay deletion can overlap store shutdown.
   await s.maintenance.stop()
+
+  await s.prometheiNode.stop()
   await s.natTraversal.stop()
   await s.repoStore.stop()
   await s.prometheiNode.switch.stop()

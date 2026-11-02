@@ -45,7 +45,7 @@ suite "Test Circom Compat Backend - control inputs":
     check (await circom.verify(proof, proofInputs)).tryGet
 
   test "Should not verify with incorrect inputs":
-    proofInputs.slotIndex = 1 # change slot index
+    proofInputs.slotIndex = proofInputs.nSlotsPerDataSet # out of range
 
     let proof = (await circom.prove(proofInputs)).tryGet
     check (await circom.verify(proof, proofInputs)).tryGet == false
@@ -106,7 +106,7 @@ suite "Test Circom Compat Backend":
     check (await circom.verify(proof, proofInputs)).tryGet
 
   test "Should not verify with incorrect input":
-    proofInputs.slotIndex = 1 # change slot index
+    proofInputs.slotIndex = proofInputs.nSlotsPerDataSet # out of range
 
     let proof = (await circom.prove(proofInputs)).tryGet
     check (await circom.verify(proof, proofInputs)).tryGet == false

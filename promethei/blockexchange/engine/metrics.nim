@@ -216,9 +216,9 @@ declarePublicHistogram(
   buckets = BlockExcDurationBuckets,
 )
 # Bytes per writeLp call — post-encode buffer size.
-# Used to compute per-write throughput and verify the 64MB-per-batch assumption.
-# Top bucket 128MiB covers 128x512KiB blocks + protobuf framing without
-# clamping p50/p95 into +Inf.
+# Used to compute per-write throughput and verify the 4MiB-per-batch assumption.
+# Top bucket 128MiB leaves headroom above 32x128KiB blocks + protobuf framing
+# without clamping p50/p95 into +Inf.
 declarePublicHistogram(
   promethei_block_exchange_network_write_bytes,
   "Bytes written per conn.writeLp call (post-encode buffer)",

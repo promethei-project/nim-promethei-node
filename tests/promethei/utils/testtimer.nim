@@ -65,3 +65,46 @@ asyncchecksuite "Timer":
     startNumbersTimer()
     startLettersTimer()
     check eventually(output == "0a1b2c3d4e", pollInterval = 10)
+
+  test "Stopping a timer that was never started completes":
+    await timer2.stop()
+
+  test "Stopping twice is idempotent":
+    startNumbersTimer()
+    check eventually(output == "0", pollInterval = 10)
+    await timer1.stop()
+    await timer1.stop()
+
+  test "Timer can be started again after it was stopped":
+    startNumbersTimer()
+    check eventually(output == "0", pollInterval = 10)
+    await timer1.stop()
+    let stoppedLength = output.len
+    startNumbersTimer()
+    check eventually(output.len > stoppedLength, pollInterval = 10)
+
+  test "Stop completes when the callback swallows cancellation":
+    # BlockMaintainer's callback catches CancelledError and returns normally, so
+    # a stop that arrives while it runs must still complete and the loop must not
+    # invoke the callback again. The stop future is never awaited directly: on a
+    # regression it never completes, and awaiting it would hang the whole suite
+    # instead of failing this test.
+    var invocations = 0
+
+    proc callback(): Future[void] {.async: (raises: []).} =
+      inc invocations
+      try:
+        await sleepAsync(50.milliseconds)
+      except CancelledError:
+        discard
+
+    let timer = Timer.new("testtimer-stop-during-callback")
+    timer.start(callback, 20.milliseconds)
+    check eventually(invocations >= 1, pollInterval = 10)
+
+    let stopping = timer.stop()
+    let invocationsAtStop = invocations
+    await sleepAsync(300.milliseconds)
+
+    check stopping.finished
+    check invocations == invocationsAtStop
